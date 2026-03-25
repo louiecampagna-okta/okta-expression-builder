@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e3a5f"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="128" height="128" rx="22" fill="url(#bg)"/>
+
+  <!-- Left curly brace { -->
+  <path d="M 48 22 Q 36 22 36 34 L 36 55 Q 36 64 24 64 Q 36 64 36 73 L 36 94 Q 36 106 48 106"
+    stroke="#4fc3f7" stroke-width="7" fill="none"
+    stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Right curly brace } -->
+  <path d="M 80 22 Q 92 22 92 34 L 92 55 Q 92 64 104 64 Q 92 64 92 73 L 92 94 Q 92 106 80 106"
+    stroke="#4fc3f7" stroke-width="7" fill="none"
+    stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Center accent dot -->
+  <circle cx="64" cy="64" r="7" fill="#a5d6a7"/>
+</svg>

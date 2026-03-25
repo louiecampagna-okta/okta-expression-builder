@@ -1,0 +1,509 @@
+/* =========================================================
+   Okta Expression Builder — Overlay Styles
+   ALL selectors are scoped under #oeb-root so that no rule
+   can bleed into Okta's own page elements.
+   ========================================================= */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap');
+
+/* ── Tokens (scoped to our root) ─────────────────────────── */
+#oeb-root {
+  --ody-primary:      #546be7;
+  --ody-primary-dk:   #22307c;
+  --ody-primary-lt:   #f2f3fd;
+  --ody-primary-ring: #b3c3f8;
+
+  --ody-n0:    #ffffff;
+  --ody-n50:   #f4f4f4;
+  --ody-n100:  #efefef;
+  --ody-n200:  #e8e8e8;
+  --ody-n300:  #d9d9d9;
+  --ody-n400:  #bfbfbf;
+  --ody-n500:  #8d8d8d;
+  --ody-n600:  #6b6b6b;
+  --ody-n700:  #545454;
+  --ody-n800:  #373737;
+  --ody-n900:  #272727;
+
+  --ody-header: #003087;
+
+  --ody-danger:     #d92300;
+  --ody-danger-lt:  #fff0ee;
+  --ody-danger-bd:  #fe8f7a;
+  --ody-success:    #2e7d32;
+  --ody-success-lt: #e8f5e9;
+  --ody-warning:    #f57c00;
+  --ody-warning-lt: #fff3e0;
+  --ody-warning-bd: #ffcc80;
+
+  --ody-border:   #e1e1e1;
+  --ody-border-c: #8d8d8d;
+  --ody-code-bg:  #f4f4f4;
+
+  --ody-r:    4px;
+  --ody-r-md: 6px;
+  --ody-r-lg: 8px;
+
+  --ody-shadow: 0 2px 8px rgba(0,0,0,0.12), 0 6px 20px rgba(0,0,0,0.10);
+  --ody-font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --ody-mono: "Roboto Mono", "Fira Code", "Consolas", "Monaco", monospace;
+}
+
+/* Scoped box-sizing + font reset — does NOT touch Okta elements */
+#oeb-root *, #oeb-root *::before, #oeb-root *::after {
+  box-sizing: border-box; margin: 0;
+  /* NOTE: padding is intentionally NOT reset here.
+     #oeb-root * has specificity (1,0,1) which beats class selectors (0,1,0)
+     and would silently erase all button/input padding. */
+  font-family: var(--ody-font);
+}
+
+/* ════════════════════════════════════════════════════════════
+   TOGGLE PILL
+   Scoped as #oeb-root .pill to beat any Okta .pill rule.
+   ════════════════════════════════════════════════════════════ */
+
+#oeb-root .pill {
+  position: fixed; bottom: 40px; right: 40px; z-index: 2147483640;
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 11px 18px;
+  background: var(--ody-primary); color: var(--ody-n0);
+  border: none; border-radius: 100px;
+  font-family: var(--ody-font); font-size: 13px; font-weight: 600; line-height: 1;
+  cursor: pointer; user-select: none;
+  box-shadow: 0 2px 8px rgba(84,107,231,0.32);
+  transition: background 0.1s, box-shadow 0.1s, transform 0.1s;
+}
+#oeb-root .pill:hover   { background: var(--ody-primary-dk); box-shadow: 0 4px 12px rgba(84,107,231,0.4); }
+#oeb-root .pill:active  { transform: scale(0.98); }
+#oeb-root .pill.pill-on { background: var(--ody-primary-dk); box-shadow: 0 0 0 3px var(--ody-primary-ring), 0 2px 8px rgba(84,107,231,0.32); }
+
+/* ════════════════════════════════════════════════════════════
+   OVERLAY PANEL
+   ════════════════════════════════════════════════════════════ */
+
+#oeb-root .overlay {
+  position: fixed; right: 40px; bottom: 96px; z-index: 2147483641;
+  width: 680px; height: 680px; min-width: 480px; min-height: 400px;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--ody-n0); border: 1px solid var(--ody-border);
+  border-radius: var(--ody-r-lg);
+  box-shadow: var(--ody-shadow);
+  color: var(--ody-n900);
+  transition: opacity 0.15s, transform 0.15s;
+}
+#oeb-root .overlay.hidden { opacity: 0; pointer-events: none; transform: translateY(6px) scale(0.99); }
+#oeb-root .overlay.min .oeb-tabs,
+#oeb-root .overlay.min .pane { display: none; }
+#oeb-root .overlay.min   { height: auto !important; }
+#oeb-root .overlay.dragging { cursor: grabbing; user-select: none; }
+
+/* ════════════════════════════════════════════════════════════
+   TITLE BAR
+   ════════════════════════════════════════════════════════════ */
+
+#oeb-root .bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 16px; height: 44px; flex-shrink: 0;
+  background: var(--ody-header); cursor: grab;
+  border-radius: var(--ody-r-lg) var(--ody-r-lg) 0 0;
+}
+#oeb-root .bar:active { cursor: grabbing; }
+#oeb-root .bar-title  { display: flex; align-items: center; gap: 8px; color: var(--ody-n0); font-size: 13px; font-weight: 600; }
+#oeb-root .bar-actions{ display: flex; align-items: center; gap: 5px; }
+#oeb-root .bar-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px;
+  background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.15);
+  border-radius: var(--ody-r); color: rgba(255,255,255,0.7);
+  cursor: pointer; transition: background 0.1s, color 0.1s;
+}
+#oeb-root .bar-btn:hover { background: rgba(255,255,255,0.2); color: var(--ody-n0); }
+
+/* ════════════════════════════════════════════════════════════
+   TAB BAR
+   ════════════════════════════════════════════════════════════ */
+
+#oeb-root .tabs {
+  display: flex; align-items: flex-end;
+  background: var(--ody-n50); border-bottom: 1px solid var(--ody-border);
+  flex-shrink: 0; padding: 0 10px; gap: 2px;
+}
+#oeb-root .tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 9px 16px;
+  background: transparent; border: none;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  color: var(--ody-n600); font-family: var(--ody-font); font-size: 13px; font-weight: 500;
+  cursor: pointer; white-space: nowrap;
+  transition: color 0.1s, background 0.1s, border-color 0.1s;
+}
+#oeb-root .tab:hover      { background: var(--ody-n100); color: var(--ody-n800); border-radius: var(--ody-r) var(--ody-r) 0 0; }
+#oeb-root .tab.tab-on     { color: var(--ody-primary); font-weight: 600; border-bottom-color: var(--ody-primary); }
+#oeb-root .tab.tab-on:hover { background: transparent; }
+
+/* ════════════════════════════════════════════════════════════
+   PANES
+   ════════════════════════════════════════════════════════════ */
+
+#oeb-root .pane           { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+#oeb-root .pane.pane-on   { display: flex; }
+
+/* ════════════════════════════════════════════════════════════
+   BUILDER PANE
+   ════════════════════════════════════════════════════════════ */
+
+#oeb-root #pane-builder { overflow: hidden; padding: 0 12px 12px; background: var(--ody-n0); }
+
+#oeb-root .controls-strip {
+  padding: 12px 16px;
+  background: var(--ody-n50); border: 1px solid var(--ody-border);
+  border-top: none; border-radius: 0 0 var(--ody-r-md) var(--ody-r-md);
+  display: flex; flex-direction: column; gap: 10px;
+  flex-shrink: 0; margin-bottom: 12px;
+}
+#oeb-root .ctrl-row   { display: flex; align-items: center; gap: 10px; }
+#oeb-root .ctrl-label {
+  font-size: 11px; font-weight: 600; color: var(--ody-n600);
+  text-transform: uppercase; letter-spacing: 0.07em;
+  width: 82px; flex-shrink: 0;
+}
+#oeb-root .ctrl-select {
+  flex: 1; background: var(--ody-n0); color: var(--ody-n900);
+  border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
+  padding: 7px 10px; font-family: var(--ody-font); font-size: 13px;
+  outline: none; cursor: pointer; transition: border-color 0.1s;
+}
+#oeb-root .ctrl-select:focus { border-color: var(--ody-primary); outline: 2px solid var(--ody-primary-ring); outline-offset: 1px; }
+
+#oeb-root .user-ctrl { flex: 1; min-width: 0; }
+
+#oeb-root .user-empty-btn {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 8px 12px;
+  background: var(--ody-n0); color: var(--ody-n600);
+  border: 1px dashed var(--ody-border-c); border-radius: var(--ody-r);
+  font-family: var(--ody-font); font-size: 13px; font-weight: 500;
+  cursor: pointer; text-align: left;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+#oeb-root .user-empty-btn:hover { background: var(--ody-primary-lt); color: var(--ody-primary); border-color: var(--ody-primary); border-style: solid; }
+
+#oeb-root .user-selected {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 12px;
+  background: var(--ody-primary-lt); border: 1px solid var(--ody-primary-ring); border-radius: var(--ody-r);
+}
+#oeb-root .user-info  { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+#oeb-root .user-name  { font-size: 13px; font-weight: 600; color: var(--ody-n900); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#oeb-root .user-email { font-size: 11px; color: var(--ody-n600); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+#oeb-root .avatar {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--ody-primary); color: var(--ody-n0);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 600; flex-shrink: 0;
+}
+#oeb-root .ava-sm { width: 24px; height: 24px; font-size: 10px; }
+
+#oeb-root .user-search-panel {
+  margin-top: 4px;
+  background: var(--ody-n0); border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+}
+#oeb-root .user-search-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--ody-border); color: var(--ody-n400);
+}
+#oeb-root .user-query-input {
+  flex: 1; background: transparent; border: none; outline: none;
+  font-family: var(--ody-font); font-size: 13px; color: var(--ody-n900);
+}
+#oeb-root .user-query-input::placeholder { color: var(--ody-n400); }
+
+#oeb-root .user-results { max-height: 190px; overflow-y: auto; }
+#oeb-root .user-result {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 12px; background: transparent; border: none;
+  border-bottom: 1px solid var(--ody-border); cursor: pointer; text-align: left;
+  transition: background 0.1s;
+}
+#oeb-root .user-result:hover       { background: var(--ody-primary-lt); }
+#oeb-root .user-result:last-child  { border-bottom: none; }
+#oeb-root .result-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+#oeb-root .result-name { font-size: 13px; font-weight: 600; color: var(--ody-n900); }
+#oeb-root .result-sub  { font-size: 11px; color: var(--ody-n600); display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+#oeb-root .no-results  { padding: 14px 12px; font-size: 13px; color: var(--ody-n600); text-align: center; }
+
+#oeb-root .status-pill    { display: inline-block; padding: 1px 6px; border-radius: 100px; font-size: 10px; font-weight: 600; }
+#oeb-root .status-active  { background: var(--ody-success-lt); color: var(--ody-success); }
+#oeb-root .status-other   { background: var(--ody-n100); color: var(--ody-n600); }
+
+#oeb-root .user-api-err {
+  margin: 6px 12px; padding: 8px 12px;
+  background: var(--ody-danger-lt); border: 1px solid var(--ody-danger-bd); border-radius: var(--ody-r);
+  font-size: 12px; color: var(--ody-danger); line-height: 1.5;
+}
+
+#oeb-root .spinner { width: 14px; height: 14px; flex-shrink: 0; border: 2px solid var(--ody-n300); border-top-color: var(--ody-primary); border-radius: 50%; animation: oeb-spin 0.6s linear infinite; }
+@keyframes oeb-spin { to { transform: rotate(360deg); } }
+
+/* ── Builder sections ─────────────────────────────────────── */
+
+#oeb-root .section { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; flex-shrink: 0; }
+#oeb-root .section + .section { border-top: 1px solid var(--ody-border); }
+
+#oeb-root .result-section {
+  flex-shrink: 0; background: var(--ody-n50);
+  border-top: 1px solid var(--ody-border);
+  padding: 12px 16px; display: flex; flex-direction: column; gap: 10px;
+}
+#oeb-root .insert-section {
+  flex: 1; min-height: 0; overflow: hidden; background: var(--ody-n50);
+  border-top: 1px solid var(--ody-border);
+  padding: 12px 16px; display: flex; flex-direction: column; gap: 10px;
+}
+
+#oeb-root .section-hd    { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+#oeb-root .section-title { font-size: 11px; font-weight: 600; color: var(--ody-n700); text-transform: uppercase; letter-spacing: 0.07em; }
+#oeb-root .spacer    { flex: 1; }
+
+/* ── Buttons ──────────────────────────────────────────────── */
+
+#oeb-root .btn-sm {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 6px 14px; min-height: 30px;
+  font-family: var(--ody-font); font-size: 13px; font-weight: 600; line-height: 1;
+  background: var(--ody-primary); color: var(--ody-n0);
+  border: none; border-radius: var(--ody-r);
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+  transition: background 0.1s;
+}
+#oeb-root .btn-sm:hover      { background: var(--ody-primary-dk); }
+#oeb-root .btn-sm:focus-visible { outline: 2px solid var(--ody-primary-ring); outline-offset: 2px; }
+#oeb-root .btn-ghost       { background: var(--ody-n0); color: var(--ody-n900); border: 1px solid var(--ody-border-c); }
+#oeb-root .btn-ghost:hover { background: var(--ody-n50); border-color: var(--ody-n700); }
+
+#oeb-root .btn-xs {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 5px 12px; min-height: 26px;
+  font-family: var(--ody-font); font-size: 12px; font-weight: 600; line-height: 1;
+  background: var(--ody-n0); color: var(--ody-n900);
+  border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+  transition: background 0.1s, border-color 0.1s;
+}
+#oeb-root .btn-xs:hover { background: var(--ody-n50); border-color: var(--ody-n700); }
+
+/* ── Textarea / inputs ────────────────────────────────────── */
+
+#oeb-root .expr-ta {
+  width: 100%; background: var(--ody-n0); color: var(--ody-n900);
+  border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
+  padding: 8px 11px; font-family: var(--ody-mono); font-size: 12px; line-height: 1.55;
+  resize: none; outline: none; height: 72px;
+  transition: border-color 0.1s;
+}
+#oeb-root .expr-ta:focus        { border-color: var(--ody-primary); outline: 2px solid var(--ody-primary-ring); outline-offset: 1px; }
+#oeb-root .expr-ta::placeholder { color: var(--ody-n400); }
+
+#oeb-root .result-box {
+  height: 72px; min-height: 72px; overflow-y: auto;
+  background: var(--ody-n0); border: 1px solid var(--ody-border); border-radius: var(--ody-r);
+  padding: 8px 11px; font-family: var(--ody-mono); font-size: 12px; line-height: 1.55;
+  word-break: break-all;
+}
+
+#oeb-root .placeholder { color: var(--ody-n400); font-family: var(--ody-font); font-style: italic; font-size: 12px; }
+
+#oeb-root .r-str  { color: var(--ody-success); }
+#oeb-root .r-num  { color: #c46900; }
+#oeb-root .r-bool { color: #6b21a8; }
+#oeb-root .r-null { color: var(--ody-n500); font-style: italic; }
+#oeb-root .r-arr  { color: var(--ody-primary); }
+#oeb-root .r-obj  { color: var(--ody-n700); white-space: pre; }
+#oeb-root .r-err  { color: var(--ody-danger); font-family: var(--ody-font); font-size: 12px; }
+
+#oeb-root .badge     { font-family: var(--ody-font); font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 100px; flex-shrink: 0; }
+#oeb-root .badge-ok  { background: var(--ody-success-lt); color: var(--ody-success); }
+#oeb-root .badge-err { background: var(--ody-danger-lt);  color: var(--ody-danger); }
+
+#oeb-root .warnings-box { display: flex; flex-direction: column; gap: 5px; flex-shrink: 0; }
+#oeb-root .warn-item    { padding: 8px 12px; background: var(--ody-warning-lt); border: 1px solid var(--ody-warning-bd); border-radius: var(--ody-r); font-size: 12px; color: #7c4700; line-height: 1.5; }
+
+/* ── Quick insert ─────────────────────────────────────────── */
+
+#oeb-root .fn-select {
+  flex: 1; background: var(--ody-n0); color: var(--ody-n900);
+  border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
+  padding: 6px 10px; font-family: var(--ody-font); font-size: 13px;
+  outline: none; cursor: pointer; transition: border-color 0.1s;
+}
+#oeb-root .fn-select:focus { border-color: var(--ody-primary); outline: 2px solid var(--ody-primary-ring); outline-offset: 1px; }
+
+#oeb-root .var-tabs      { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; flex-shrink: 0; }
+#oeb-root .var-tab-label { font-size: 11px; font-weight: 600; color: var(--ody-n600); text-transform: uppercase; letter-spacing: 0.07em; margin-right: 4px; flex-shrink: 0; }
+#oeb-root .var-tab {
+  display: inline-flex; align-items: center;
+  padding: 5px 12px; min-height: 26px;
+  font-family: var(--ody-mono); font-size: 11px; font-weight: 500; line-height: 1;
+  background: var(--ody-n0); color: var(--ody-n700);
+  border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
+  cursor: pointer; white-space: nowrap;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+#oeb-root .var-tab:hover      { background: var(--ody-n50); color: var(--ody-n900); border-color: var(--ody-n700); }
+#oeb-root .var-tab.var-tab-on { background: var(--ody-primary-lt); color: var(--ody-primary); border-color: var(--ody-primary); font-weight: 600; }
+
+#oeb-root .attr-list {
+  flex: 1; min-height: 0; overflow-y: auto;
+  border: 1px solid var(--ody-border); border-radius: var(--ody-r);
+  background: var(--ody-n0);
+}
+#oeb-root .attr-row {
+  display: flex; align-items: baseline; gap: 10px;
+  width: 100%; padding: 5px 10px;
+  background: transparent; border: none;
+  border-bottom: 1px solid var(--ody-border);
+  cursor: pointer; text-align: left;
+  transition: background 0.1s;
+}
+#oeb-root .attr-row:hover      { background: var(--ody-primary-lt); }
+#oeb-root .attr-row:last-child { border-bottom: none; }
+#oeb-root .attr-key {
+  font-family: var(--ody-mono); font-size: 11px; font-weight: 500;
+  color: var(--ody-n900); flex-shrink: 0; min-width: 130px;
+}
+#oeb-root .attr-val {
+  font-family: var(--ody-mono); font-size: 11px;
+  color: var(--ody-n500); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+}
+#oeb-root .attr-empty { padding: 12px 10px; font-size: 12px; color: var(--ody-n500); }
+
+/* .hidden is now scoped — will never hide Okta's own elements */
+#oeb-root .hidden { display: none !important; }
+
+/* ════════════════════════════════════════════════════════════
+   REFERENCE PANE
+   ════════════════════════════════════════════════════════════ */
+
+#oeb-root #pane-reference { padding: 12px; background: var(--ody-n0); }
+
+#oeb-root .search-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
+  background: var(--ody-n0); flex-shrink: 0; color: var(--ody-n400);
+  margin-bottom: 10px; transition: border-color 0.1s;
+}
+#oeb-root .search-bar:focus-within { border-color: var(--ody-primary); outline: 2px solid var(--ody-primary-ring); outline-offset: 1px; }
+#oeb-root .search-input {
+  flex: 1; background: transparent; border: none; outline: none;
+  font-family: var(--ody-font); font-size: 13px; color: var(--ody-n900);
+}
+#oeb-root .search-input::placeholder { color: var(--ody-n400); }
+
+#oeb-root .ref-list { flex: 1; overflow-y: auto; border: 1px solid var(--ody-border); border-radius: var(--ody-r-md); }
+
+#oeb-root .ref-ns-hd {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px 7px;
+  background: var(--ody-n50); border-bottom: 1px solid var(--ody-border);
+  border-left: 3px solid var(--c, var(--ody-primary));
+  position: sticky; top: 0; z-index: 2;
+}
+#oeb-root .ref-ns-dot   { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+#oeb-root .ref-ns-name  { font-size: 12px; font-weight: 700; color: var(--ody-n900); }
+#oeb-root .ref-ns-count { margin-left: auto; font-size: 10px; font-weight: 600; color: var(--ody-n500); background: var(--ody-n200); padding: 1px 6px; border-radius: 100px; }
+
+#oeb-root .ref-fn {
+  padding: 10px 14px 10px 28px; cursor: pointer;
+  border-bottom: 1px solid var(--ody-border);
+  transition: background 0.1s; position: relative;
+}
+#oeb-root .ref-fn:hover { background: var(--ody-primary-lt); }
+#oeb-root .ref-fn:hover::after { opacity: 1; }
+#oeb-root .ref-fn::after { content: "Use ↗"; position: absolute; top: 10px; right: 12px; font-size: 11px; font-weight: 600; color: var(--ody-primary); opacity: 0; transition: opacity 0.1s; }
+#oeb-root .ref-fn:last-child { border-bottom: none; }
+#oeb-root .ref-sig  { display: block; font-family: var(--ody-mono); font-size: 11px; font-weight: 500; color: var(--ody-primary); margin-bottom: 3px; }
+#oeb-root .ref-desc { font-size: 12px; color: var(--ody-n700); margin-bottom: 4px; line-height: 1.5; white-space: pre-line; }
+#oeb-root .ref-ex   { display: inline-block; font-family: var(--ody-mono); font-size: 11px; color: var(--ody-success); background: var(--ody-code-bg); padding: 2px 8px; border-radius: var(--ody-r); }
+
+/* ════════════════════════════════════════════════════════════
+   TEMPLATES PANE
+   ════════════════════════════════════════════════════════════ */
+
+#oeb-root #pane-templates { padding: 12px; background: var(--ody-n0); }
+
+#oeb-root .tpl-filter-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 5px;
+  padding: 8px 12px;
+  border: 1px solid var(--ody-border); border-radius: var(--ody-r);
+  background: var(--ody-n50); flex-shrink: 0; margin-bottom: 10px;
+}
+#oeb-root .tpl-filter-btn {
+  display: inline-flex; align-items: center;
+  padding: 4px 11px; min-height: 24px;
+  background: var(--ody-n0); color: var(--ody-n700);
+  border: 1px solid var(--ody-border); border-radius: 100px;
+  font-family: var(--ody-font); font-size: 11px; font-weight: 500; line-height: 1;
+  cursor: pointer; white-space: nowrap;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+#oeb-root .tpl-filter-btn:hover         { background: var(--ody-n100); color: var(--ody-n900); }
+#oeb-root .tpl-filter-btn.tpl-filter-on { background: var(--ody-primary); color: var(--ody-n0); border-color: var(--ody-primary); font-weight: 600; }
+
+#oeb-root .tpl-list { flex: 1; overflow-y: auto; border: 1px solid var(--ody-border); border-radius: var(--ody-r-md); }
+
+#oeb-root .tpl-group-hd {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px 7px;
+  background: var(--ody-n50); border-bottom: 1px solid var(--ody-border);
+  border-top: 1px solid var(--ody-border);
+  position: sticky; top: 0; z-index: 2;
+}
+#oeb-root .tpl-group:first-child .tpl-group-hd { border-top: none; }
+#oeb-root .tpl-group-name  { font-size: 12px; font-weight: 700; color: var(--ody-n900); }
+#oeb-root .tpl-group-count { margin-left: auto; font-size: 10px; font-weight: 600; color: var(--ody-n500); background: var(--ody-n200); padding: 1px 6px; border-radius: 100px; }
+
+#oeb-root .tpl-item {
+  padding: 11px 14px; border-bottom: 1px solid var(--ody-border);
+  cursor: pointer; transition: background 0.1s; position: relative;
+  background: var(--ody-n0);
+}
+#oeb-root .tpl-item:hover            { background: var(--ody-primary-lt); }
+#oeb-root .tpl-item:last-child       { border-bottom: none; }
+#oeb-root .tpl-item:hover::after     { opacity: 1; }
+#oeb-root .tpl-item::after { content: "Load ↗"; position: absolute; top: 11px; right: 12px; font-size: 11px; font-weight: 600; color: var(--ody-primary); opacity: 0; transition: opacity 0.1s; }
+
+#oeb-root .tpl-row   { display: flex; align-items: center; gap: 7px; margin-bottom: 3px; }
+#oeb-root .tpl-name  { font-size: 13px; font-weight: 600; color: var(--ody-n900); }
+#oeb-root .tpl-tag   { font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 100px; background: var(--ody-primary-lt); color: var(--ody-primary); flex-shrink: 0; }
+#oeb-root .tpl-desc  { font-size: 12px; color: var(--ody-n600); line-height: 1.5; margin-bottom: 6px; }
+#oeb-root .tpl-expr  {
+  display: block; font-family: var(--ody-mono); font-size: 11px; color: var(--ody-success);
+  background: var(--ody-code-bg); border: 1px solid var(--ody-n200);
+  padding: 4px 10px; border-radius: var(--ody-r);
+  overflow-x: auto; white-space: nowrap; max-width: calc(100% - 48px);
+}
+
+/* ════════════════════════════════════════════════════════════
+   RESIZE HANDLE
+   ════════════════════════════════════════════════════════════ */
+
+#oeb-root .resize-handle {
+  position: absolute; bottom: 0; right: 0; width: 16px; height: 16px;
+  cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 40%, var(--ody-n300) 40%);
+  border-radius: 0 0 var(--ody-r-lg) 0; opacity: 0.5; transition: opacity 0.1s;
+}
+#oeb-root .resize-handle:hover { opacity: 1; }
+
+/* ════════════════════════════════════════════════════════════
+   SCROLLBARS  (scoped — won't affect Okta's scrollbars)
+   ════════════════════════════════════════════════════════════ */
+
+#oeb-root ::-webkit-scrollbar        { width: 5px; height: 5px; }
+#oeb-root ::-webkit-scrollbar-track  { background: transparent; }
+#oeb-root ::-webkit-scrollbar-thumb  { background: var(--ody-n300); border-radius: 3px; }
+#oeb-root ::-webkit-scrollbar-thumb:hover { background: var(--ody-n400); }
