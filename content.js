@@ -12,6 +12,7 @@
   const LS = {
     VISIBLE:'oeb_visible', MIN:'oeb_min', TAB:'oeb_tab',
     CTX:'oeb_ctx', EXPR:'oeb_expr', POS:'oeb_pos',
+    TOKEN_TYPE:'oeb_token_type', AUTH_SERVER:'oeb_auth_server',
   };
 
   // ── OEL Contexts ─────────────────────────────────────────────
@@ -89,6 +90,75 @@
       restrictions: [],
     },
   ];
+
+  // ── Policy presets ────────────────────────────────────────────
+  // Preset combinations for App Sign-On Policy expressions that reference
+  // device.*, session.amr, and security.risk.*. These are runtime signals
+  // Okta populates during a real sign-in — there's no way to fetch them
+  // from an API, so we ship a small set of realistic combinations.
+  const POLICY_PRESETS = [
+    {
+      id: 'managed-mfa-low',
+      label: 'Managed corp device · pwd+MFA · low risk',
+      device:   { profile: { managed: true,  registered: true,  platform: 'MACOS' } },
+      session:  { amr: ['pwd', 'mfa'] },
+      security: { risk: { level: 'LOW' } },
+    },
+    {
+      id: 'unmanaged-pwd-low',
+      label: 'Unmanaged personal device · pwd only · low risk',
+      device:   { profile: { managed: false, registered: false, platform: 'IOS' } },
+      session:  { amr: ['pwd'] },
+      security: { risk: { level: 'LOW' } },
+    },
+    {
+      id: 'managed-webauthn-low',
+      label: 'Managed corp device · pwd+WebAuthn · low risk',
+      device:   { profile: { managed: true,  registered: true,  platform: 'WINDOWS' } },
+      session:  { amr: ['pwd', 'hwk'] },
+      security: { risk: { level: 'LOW' } },
+    },
+    {
+      id: 'registered-mfa-medium',
+      label: 'Registered BYOD · pwd+MFA · medium risk',
+      device:   { profile: { managed: false, registered: true,  platform: 'ANDROID' } },
+      session:  { amr: ['pwd', 'mfa'] },
+      security: { risk: { level: 'MEDIUM' } },
+    },
+    {
+      id: 'unmanaged-pwd-high',
+      label: 'Unmanaged device · pwd only · high risk',
+      device:   { profile: { managed: false, registered: false, platform: 'IOS' } },
+      session:  { amr: ['pwd'] },
+      security: { risk: { level: 'HIGH' } },
+    },
+    {
+      id: 'kerberos-managed-low',
+      label: 'Managed device · Kerberos SSO · low risk',
+      device:   { profile: { managed: true,  registered: true,  platform: 'WINDOWS' } },
+      session:  { amr: ['kba'] },
+      security: { risk: { level: 'LOW' } },
+    },
+  ];
+
+  function buildPolicyPresetOptions() {
+    return POLICY_PRESETS.map((p, i) =>
+      `<option value="${p.id}"${i===0?' selected':''}>${esc(p.label)}</option>`
+    ).join('');
+  }
+
+  function applyPolicyPreset(id) {
+    const p = POLICY_PRESETS.find(x => x.id === id) || POLICY_PRESETS[0];
+    state.profile = {
+      ...state.profile,
+      device:   p.device,
+      session:  p.session,
+      security: p.security,
+    };
+    state.evaluator = new OELEvaluator(state.profile);
+    refreshChips();
+    scheduleEval();
+  }
 
   // ── Default mock profile ──────────────────────────────────────
   const DEFAULT_PROFILE = {
@@ -215,8 +285,6 @@
         { sig:'String.startsWith(str, prefix)',               desc:'True if str starts with prefix.',                                          ex:"String.startsWith(user.userType, 'Emp')" },
         { sig:'String.removeSpaces(str)',                     desc:'Removes all whitespace characters.',                                        ex:"String.removeSpaces(user.displayName)" },
         { sig:'String.trim(str)',                             desc:'Strips leading and trailing whitespace.',                                    ex:"String.trim(user.firstName)" },
-        { sig:'String.match(str, regex)',                     desc:'True if str matches the full regex.',                                       ex:"String.match(user.email, '^[a-z]+\\\\.[a-z]+@')" },
-        { sig:'String.splitByRegex(str, regex)',              desc:'Splits str by regex and returns an array.',                                 ex:"String.splitByRegex(user.displayName, '\\\\s+')" },
         { sig:'String.stringSwitch(input, default, k1, v1, ...)',desc:'Returns v1 if input==k1, else next pair, else default.',               ex:"String.stringSwitch(user.department,'Other','Engineering','dev')" },
         { sig:'String.toString(value)',                       desc:'Converts any value to its string representation.',                          ex:"String.toString(user.employeeNumber)" },
         { sig:'value.toUpperCase()',                          desc:'Identity Engine method style — same as String.toUpperCase.',               ex:"user.department.toUpperCase()" },
@@ -458,6 +526,16 @@
     searchTimer:   null,
     sessionPollId: null,
     selectedUser: null,
+    selectedApp:  null,   // { id, label, name, signOnMode, status, clientId, appProfile }
+    appAssignment: 'unknown',  // 'unknown' | 'assigned' | 'unassigned'
+    appSearchTimer: null,
+    userSchema:    null,  // { attrName: null } — declared attributes on the org's user profile
+    appSchema:     null,  // { attrName: null } — declared attributes on the selected app's user schema
+    authServers:   [],    // { id, name, audiences, ... } — populated on init
+    authServerClaims: {}, // { [authServerId]: [claim, ...] } — cached per server
+    tokenType:  ls(LS.TOKEN_TYPE,   'id'),      // 'id' | 'access'
+    authServerId: ls(LS.AUTH_SERVER, 'default'), // auth server to use for preview
+    outputTab: 'result',  // 'result' | 'token' | 'rule' — which output-pane is showing
     chipVar:    'user',   // which object's attributes to show in Quick Insert chips
     searchOpen: false,
     isDragging: false, dragStart: {mx:0,my:0,ox:0,oy:0},
@@ -514,19 +592,34 @@
   }
 
   // Build a scrollable attribute list for any profile variable (user, appuser, idpuser, etc.)
+  // For user + appuser we merge in the org's schema so every DECLARED attribute is listed,
+  // even if the currently selected user has no value for it.
   function buildChips(varName) {
-    const obj = state.profile[varName] || {};
-    const entries = Object.entries(obj).filter(([, v]) => typeof v !== 'function');
+    const populated = state.profile[varName] || {};
+    let base = {};
+    if (varName === 'user'    && state.userSchema) base = state.userSchema;
+    if (varName === 'appuser' && state.appSchema)  base = state.appSchema;
+    // Populated values override the null placeholders from the schema.
+    const merged = { ...base, ...populated };
+    const entries = Object.entries(merged).filter(([, v]) => typeof v !== 'function');
     if (!entries.length) {
       return `<div class="attr-empty">No attributes for <code>${esc(varName)}</code></div>`;
     }
+    // Sort so populated attributes appear before null placeholders.
+    entries.sort((a, b) => {
+      const aHas = a[1] !== null && a[1] !== undefined;
+      const bHas = b[1] !== null && b[1] !== undefined;
+      if (aHas !== bHas) return aHas ? -1 : 1;
+      return a[0].localeCompare(b[0]);
+    });
     return entries.map(([k, v]) => {
       const raw = v === null || v === undefined ? 'null'
                 : Array.isArray(v)              ? `[${v.length} items]`
                 : typeof v === 'boolean'        ? String(v)
                 : String(v);
       const display = raw.length > 40 ? raw.substring(0, 40) + '…' : raw;
-      return `<button class="attr-row" data-insert="${esc(varName)}.${esc(k)}">
+      const dim     = (v === null || v === undefined) ? ' attr-row-null' : '';
+      return `<button class="attr-row${dim}" data-insert="${esc(varName)}.${esc(k)}">
         <span class="attr-key">${esc(k)}</span>
         <span class="attr-val">${esc(display)}</span>
       </button>`;
@@ -574,6 +667,8 @@
            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
            Using mock user — click to search org
          </button>`;
+
+    const appLine = buildAppLineHTML();
 
     return `<div id="oeb-root">
 
@@ -633,6 +728,30 @@
           <div id="user-results" class="user-results"></div>
           <div id="user-api-err" class="user-api-err hidden"></div>
         </div>
+        <div class="ctrl-row">
+          <label class="ctrl-label">Testing app</label>
+          <div class="app-ctrl">
+            ${appLine}
+          </div>
+        </div>
+        <!-- Inline app search panel (hidden by default) -->
+        <div id="app-search-panel" class="user-search-panel hidden">
+          <div class="user-search-row">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input id="app-query" class="user-query-input" type="text" placeholder="Search apps by name or label (incl. AD, LDAP)…" autocomplete="off">
+            <div id="app-spinner" class="spinner hidden"></div>
+            <button id="app-cancel" class="btn-xs btn-ghost">Cancel</button>
+          </div>
+          <div id="app-results" class="user-results"></div>
+          <div id="app-api-err" class="user-api-err hidden"></div>
+        </div>
+        <!-- Policy presets — only shown when context is App Sign-On Policy -->
+        <div class="ctrl-row" id="policy-preset-row">
+          <label class="ctrl-label">Policy</label>
+          <select id="policy-preset" class="ctrl-select" title="Preset for device/session/security context in App Sign-On Policy testing">
+            ${buildPolicyPresetOptions()}
+          </select>
+        </div>
       </div>
 
       <!-- Expression editor -->
@@ -643,22 +762,59 @@
           <button id="btn-copy"  class="btn-sm">Copy</button>
           <button id="btn-clear" class="btn-sm btn-ghost">Clear</button>
         </div>
-        <textarea id="expr-input" class="expr-ta" spellcheck="false" autocomplete="off"
-          placeholder="Enter an OEL expression…&#10;e.g.  String.substringBefore(user.email, '@')"
-        >${esc(state.expr)}</textarea>
+        <div class="expr-wrap">
+          <pre id="expr-highlight" class="expr-ta expr-highlight" aria-hidden="true"></pre>
+          <textarea id="expr-input" class="expr-ta expr-input-overlay" spellcheck="false" autocomplete="off"
+            placeholder="Enter an OEL expression…&#10;e.g.  String.substringBefore(user.email, '@')"
+          >${esc(state.expr)}</textarea>
+          <div id="sig-popup" class="sig-popup hidden"></div>
+          <div id="ac-popup"  class="ac-popup hidden"></div>
+        </div>
       </div>
 
-      <!-- Result -->
-      <div class="section result-section">
-        <div class="section-hd">
-          <span class="section-title">Result</span>
-          <div class="spacer"></div>
-          <span id="result-badge" class="badge"></span>
+      <!-- Combined output: Result + Token Preview + Rule Preview.
+           Tabs appear conditionally based on context so the box stays compact. -->
+      <div class="section output-section">
+        <div class="output-tabs" id="output-tabs">
+          <button class="output-tab output-tab-on" data-otab="result" id="otab-result">Result <span id="result-badge" class="badge"></span></button>
+          <button class="output-tab hidden" data-otab="token"  id="otab-token">Token Preview</button>
+          <button class="output-tab hidden" data-otab="rule"   id="otab-rule">Rule Preview</button>
         </div>
-        <div id="result-box" class="result-box">
-          <span class="placeholder">Type an expression above to evaluate it…</span>
+
+        <div class="output-pane" id="opane-result">
+          <div id="result-box" class="result-box">
+            <span class="placeholder">Type an expression above to evaluate it…</span>
+          </div>
+          <div id="warnings-box" class="warnings-box hidden"></div>
         </div>
-        <div id="warnings-box" class="warnings-box hidden"></div>
+
+        <div class="output-pane hidden" id="opane-token">
+          <div class="output-pane-hd">
+            <select id="token-type-select" class="btn-sm token-select" title="Which token to preview">
+              <option value="id"${state.tokenType==='id'?' selected':''}>ID Token</option>
+              <option value="access"${state.tokenType==='access'?' selected':''}>Access Token</option>
+            </select>
+            <select id="auth-server-select" class="btn-sm token-select" title="Which authorization server's claims to include">
+              <option value="default">Org Authorization Server</option>
+            </select>
+            <input id="token-claim-name" class="btn-sm token-name-input" type="text" placeholder="claim name" value="customClaim" spellcheck="false" autocomplete="off" />
+            <span class="spacer"></span>
+            <span class="token-title" id="token-section-title">Token Preview</span>
+          </div>
+          <pre id="token-preview" class="token-preview"></pre>
+          <div id="token-eval-errors" class="token-eval-errors hidden"></div>
+        </div>
+
+        <div class="output-pane hidden" id="opane-rule">
+          <div class="output-pane-hd">
+            <button id="group-rule-run" class="btn-sm">Run against org</button>
+            <div id="group-rule-spinner" class="spinner hidden"></div>
+            <span class="spacer"></span>
+            <div id="group-rule-summary" class="group-rule-summary hidden"></div>
+          </div>
+          <div id="group-rule-results" class="group-rule-results"></div>
+          <div id="group-rule-err" class="user-api-err hidden"></div>
+        </div>
       </div>
 
       <!-- Quick insert -->
@@ -760,9 +916,428 @@
         warn.innerHTML = ''; warn.classList.add('hidden');
       }
     }
+
+    renderTokenPreview(res.success ? res.result : null, !!res.error);
+  }
+
+  // Claim names Okta ACTUALLY emits in tokens. Sourced from Okta's OIDC
+  // reference docs — NOT from generic OIDC standards. Some OIDC-standard
+  // names (unique_name, client_id) are deliberately absent because Okta
+  // doesn't emit them; likewise some Okta-specific names appear here that
+  // are not in the OIDC spec.
+  // See: developer.okta.com/docs/reference/api/oidc/#tokens-and-claims
+  const OKTA_ID_TOKEN_CLAIMS = new Set([
+    // Always emitted
+    'ver', 'jti', 'iss', 'aud', 'iat', 'exp', 'amr', 'idp', 'nonce', 'auth_time', 'sub',
+    // With `profile` scope
+    'name', 'preferred_username', 'nickname', 'given_name', 'middle_name',
+    'family_name', 'profile', 'zoneinfo', 'locale', 'updated_at',
+    'birthdate', 'gender', 'picture', 'website',
+    // With `email` scope
+    'email', 'email_verified',
+    // With `address` scope
+    'address',
+    // With `phone` scope
+    'phone_number', 'phone_number_verified',
+    // With `groups` scope (if configured)
+    'groups',
+  ]);
+  const OKTA_ACCESS_TOKEN_CLAIMS = new Set([
+    'ver', 'jti', 'iss', 'aud', 'iat', 'exp', 'cid', 'uid', 'scp', 'sub', 'auth_time',
+    'groups',
+  ]);
+
+  // Evaluate every claim configured on the selected authorization server that
+  // WOULD actually be included in a real token given the current context.
+  // Filtering matches Okta's runtime: status=ACTIVE, correct claimType for the
+  // token, and at least one of the claim's required scopes is in the requested
+  // scope list (or the claim has no scope condition).
+  // Returns { values, errors, skipped }:
+  //   values:  { name: evaluatedValue }              — what makes it into the token
+  //   errors:  [{ name, expr, message }]             — evaluated but threw; OMITTED from token
+  //   skipped: [{ name, requiredScopes }]            — filtered out by scope condition
+  function evaluateAuthServerClaims(claims, tokenType) {
+    if (!claims || !claims.length) return { values: {}, errors: [], skipped: [] };
+    const wantType = tokenType === 'id' ? 'IDENTITY' : 'RESOURCE';
+    const requested = new Set(state.profile.access?.scope || []);
+    const evaluator = new OELEvaluator(state.profile);
+    const values  = {};
+    const errors  = [];
+    const skipped = [];
+
+    const okList = tokenType === 'id' ? OKTA_ID_TOKEN_CLAIMS : OKTA_ACCESS_TOKEN_CLAIMS;
+    // Okta-system-generated claims. These are populated by Okta from the
+    // user/app/org context — the API may return them as claim records with
+    // OEL expressions, but their value is determined by Okta at runtime, not
+    // by any tenant expression. Base owns them; evaluation must not override.
+    // (Access token `sub` = user's login; ID token `sub` = user's Okta ID.)
+    const BASE_OWNED = new Set(['sub', 'iss', 'aud', 'iat', 'exp', 'jti', 'ver', 'cid', 'uid', 'scp', 'auth_time', 'idp', 'amr']);
+    for (const c of claims) {
+      if (!c || typeof c.name !== 'string') continue;
+      if (!c.claimType || !c.valueType)     continue;
+      // Strict: only names that Okta documents as being emitted for this
+      // token type make it through. Okta returns many records from the
+      // claims endpoint that it never emits (policy/internal/legacy AD
+      // claim records like `restriction_criteria`, `unique_name`, etc.) —
+      // this list is what actually lands in a real Okta token.
+      if (!okList.has(c.name)) continue;
+      // Skip claims Okta owns end-to-end so tenant-authored records can't
+      // clobber the correct base values (e.g. access-token sub = user.login).
+      if (BASE_OWNED.has(c.name)) continue;
+      if (c.status !== 'ACTIVE') continue;
+      if (c.claimType !== wantType) continue;
+
+      // Inclusion rule (matches Okta runtime):
+      //   include IF alwaysIncludeInToken === true
+      //   OR      IF conditions.scopes has at least one match with requested scopes
+      //   OTHERWISE skip
+      // Previously we only checked conditions.scopes, which wrongly included
+      // claims with alwaysIncludeInToken=false AND empty scope conditions —
+      // those never appear in a real token.
+      const reqScopes = c.conditions?.scopes || [];
+      const alwaysInclude = c.alwaysIncludeInToken === true;
+      const scopeMatched  = reqScopes.some(s => requested.has(s));
+      if (!alwaysInclude && !scopeMatched) {
+        // Only report as "skipped by scope" if it has scope conditions the user
+        // could satisfy — otherwise the claim is simply not eligible and
+        // there's nothing actionable for the user to know.
+        if (reqScopes.length) skipped.push({ name: c.name, requiredScopes: reqScopes });
+        continue;
+      }
+
+      if (c.valueType === 'EXPRESSION' && c.value) {
+        const res = evaluator.evaluate(c.value, state.profile);
+        if (res.success) {
+          values[c.name] = res.result;
+        }
+        // Failing claims are silently dropped (matching Okta runtime). We
+        // deliberately do NOT surface them in the UI — the Okta claims API
+        // returns internal / placeholder claims that most tenants don't
+        // recognize, and showing errors for them just confuses users.
+        // Devs debugging their own tenant-authored claims can inspect the
+        // full response in DevTools instead.
+      } else if (c.valueType === 'GROUPS' && c.group_filter_type) {
+        const groups = state.profile.groups || [];
+        const pat = c.value || '';
+        let filtered = groups;
+        if (c.group_filter_type === 'STARTS_WITH')  filtered = groups.filter(g => g.startsWith(pat));
+        else if (c.group_filter_type === 'CONTAINS') filtered = groups.filter(g => g.includes(pat));
+        else if (c.group_filter_type === 'EQUALS')   filtered = groups.filter(g => g === pat);
+        else if (c.group_filter_type === 'REGEX')    { try { const re = new RegExp(pat); filtered = groups.filter(g => re.test(g)); } catch {} }
+        values[c.name] = filtered;
+      }
+      // SYSTEM claims are populated by the base-claims block; don't shadow them.
+    }
+    return { values, errors, skipped };
+  }
+
+  // Render a JWT-style / SAML-style preview. For OIDC we now build a full
+  // token: base OIDC claims + all evaluated auth-server claims + the claim
+  // currently being edited (whose expression result wins on name collision).
+  // Rendering is skipped when the token pane isn't relevant to the current
+  // context — the tab itself is already hidden by updateOutputTabs.
+  function renderTokenPreview(exprResult, hadError) {
+    const pre     = document.getElementById('token-preview');
+    const title   = document.getElementById('token-section-title');
+    if (!pre || !title) return;
+    if (state.ctx !== 'oauth_claims' && state.ctx !== 'saml') return;
+
+    const claimEl = document.getElementById('token-claim-name');
+    const rawName = (claimEl?.value || '').trim();
+    const claimName = rawName || 'customClaim';
+    const editedValue = hadError ? '<expression error>' : (exprResult === undefined ? null : exprResult);
+
+    if (state.ctx === 'saml') {
+      // SAML preview stays simple — the auth-server / token-type controls only
+      // apply to OIDC. Keep the previous behavior.
+      title.textContent = 'SAML Assertion Preview';
+      const p = state.profile;
+      const attrs = {
+        [claimName]: editedValue,
+        email:       p.user?.email || null,
+        firstName:   p.user?.firstName || null,
+        lastName:    p.user?.lastName || null,
+      };
+      const attrLines = Object.entries(attrs).map(([k, v]) =>
+        `    <saml:Attribute Name="${k}"><saml:AttributeValue>${v == null ? '' : String(v)}</saml:AttributeValue></saml:Attribute>`
+      ).join('\n');
+      const nameId = p.user?.login || p.user?.email || 'unknown';
+      pre.textContent =
+`<saml:Assertion>
+  <saml:Subject>
+    <saml:NameID Format="emailAddress">${nameId}</saml:NameID>
+  </saml:Subject>
+  <saml:AttributeStatement>
+${attrLines}
+  </saml:AttributeStatement>
+</saml:Assertion>`;
+      return;
+    }
+
+    // OIDC preview — build a full token based on token type + auth server.
+    const p          = state.profile;
+    const now        = 1735689600;
+    const authServer = state.authServers.find(s => s.id === state.authServerId);
+    const claims     = state.authServerClaims[state.authServerId] || [];
+    const isOrgServer = state.authServerId === 'default' || /org authorization server/i.test(authServer?.name || '');
+    // Okta issues tokens from the user-facing domain (tenant.okta.com), NOT
+    // the admin domain the extension runs on (tenant-admin.okta.com). Strip
+    // the "-admin" so `iss` matches what a real token would carry.
+    const tokenHost = window.location.hostname.replace(/-admin\./, '.');
+    const issuer    = isOrgServer
+      ? `https://${tokenHost}`
+      : authServer?.issuer || `https://${tokenHost}/oauth2/${state.authServerId}`;
+
+    // Base claims Okta always includes in an ID token issued from its auth
+    // servers. These aren't stored as configurable claim records — Okta
+    // populates them from the user + app + org context at runtime.
+    // `idp` is the Okta org's ID (00o...), not the URL — that's what Okta
+    // emits when the user authenticates via Okta directly rather than through
+    // an external federated identity provider.
+    const baseIdToken = {
+      sub:                p.user?.id || p.user?.login || null,
+      iss:                issuer,
+      aud:                p.app?.clientId || null,
+      iat:                now,
+      exp:                now + 3600,
+      auth_time:          now,
+      amr:                p.session?.amr || [],
+      idp:                p.org?.id || null,
+      name:               p.user?.displayName || null,
+      email:              p.user?.email || null,
+      preferred_username: p.user?.login || null,
+    };
+    const baseAccessToken = {
+      ver:     1,
+      jti:     'AT.preview',
+      iss:     issuer,
+      aud:     isOrgServer ? p.app?.clientId : (authServer?.audiences?.[0] || null),
+      iat:     now,
+      exp:     now + 3600,
+      cid:     p.app?.clientId || null,
+      uid:     p.user?.id || null,
+      scp:     p.access?.scope || [],
+      // Okta access token sub = the user's login (username). Not the id,
+      // not the email — the login. Explicit here so it's clear.
+      sub:     p.user?.login || null,
+      auth_time: now,
+    };
+
+    const base = state.tokenType === 'id' ? baseIdToken : baseAccessToken;
+    // Evaluated existing claims come from the selected auth server.
+    const { values: evaluated, errors: evalErrors, skipped: skippedByScope } =
+      evaluateAuthServerClaims(claims, state.tokenType);
+    // The currently-edited claim wins on name collision so the user sees the
+    // effect of their edit relative to the deployed configuration.
+    const token = { ...base, ...evaluated, [claimName]: editedValue };
+
+    // Title reflects both dimensions so the user can never lose track of what
+    // they're looking at.
+    const tokenLabel = state.tokenType === 'id' ? 'ID Token' : 'Access Token';
+    const svrLabel   = isOrgServer ? 'Org Authorization Server' : `Custom: ${authServer?.name || state.authServerId}`;
+    title.textContent = `${tokenLabel} Preview · ${svrLabel}`;
+    pre.textContent = JSON.stringify(token, null, 2);
+
+    // Footer shows only scope-filtered claims — that's an actionable signal
+    // (add a scope to see them). Eval errors are silently dropped so the
+    // preview matches Okta runtime without surfacing noise from claims the
+    // tenant didn't author.
+    const errFoot = document.getElementById('token-eval-errors');
+    if (errFoot) {
+      if (skippedByScope.length) {
+        const skipRows = skippedByScope.map(s =>
+          `<div class="token-err-row"><code class="token-err-name">${esc(s.name)}</code>` +
+          `<span class="token-err-msg">requires scope: ${esc(s.requiredScopes.join(', '))}</span></div>`
+        ).join('');
+        errFoot.innerHTML =
+          `<div class="token-info-hd">ⓘ ${skippedByScope.length} claim${skippedByScope.length===1?'':'s'} filtered out by scope conditions (requested scopes: ${esc([...(state.profile.access?.scope||[])].join(', ') || '(none)')}):</div>${skipRows}`;
+        errFoot.classList.remove('hidden');
+      } else {
+        errFoot.innerHTML = '';
+        errFoot.classList.add('hidden');
+      }
+    }
   }
 
   const scheduleEval = () => { clearTimeout(state.evalTimer); state.evalTimer = setTimeout(runEval, 180); };
+
+  // ── Syntax highlighting ───────────────────────────────────────
+  // Overlay approach: the visible <pre id="expr-highlight"> renders colored
+  // tokens; a transparent-colored <textarea> sits on top so the browser still
+  // handles selection, IME, caret, and accessibility. Both elements share the
+  // exact same font, padding, and box model so tokens align perfectly with
+  // the invisible characters in the textarea.
+  const HL_KEYWORDS   = new Set(['null', 'true', 'false', 'AND', 'OR', 'and', 'or']);
+  const HL_NAMESPACES = new Set(['String', 'Arrays', 'Time', 'Convert', 'Iso3166Convert', 'DateTime', 'Groups']);
+  const HL_ROOTS      = new Set(['user', 'appuser', 'idpuser', 'app', 'access', 'org', 'device', 'session', 'security', 'groups', 'groupIds', 'client', 'oauth_request', 'context']);
+
+  // Simple hand-rolled tokenizer sufficient for coloring. NOT the evaluator's
+  // parser — that one handles precedence + AST; this one just yields spans.
+  function highlightOEL(src) {
+    const out = [];
+    let i = 0;
+    const push = (cls, text) => out.push({ cls, text });
+    while (i < src.length) {
+      const ch = src[i];
+      // Whitespace
+      if (/\s/.test(ch)) { push('', ch); i++; continue; }
+      // String literals (single or double quoted, with escape handling)
+      if (ch === '"' || ch === "'") {
+        const quote = ch;
+        let j = i + 1;
+        while (j < src.length && src[j] !== quote) {
+          if (src[j] === '\\' && j + 1 < src.length) j += 2;
+          else j++;
+        }
+        if (j < src.length) j++;   // include closing quote
+        push('hl-str', src.substring(i, j));
+        i = j; continue;
+      }
+      // Numbers
+      if (/\d/.test(ch)) {
+        let j = i + 1;
+        while (j < src.length && /[\d.]/.test(src[j])) j++;
+        push('hl-num', src.substring(i, j));
+        i = j; continue;
+      }
+      // Identifiers (including namespaces, keywords, functions, roots)
+      if (/[A-Za-z_]/.test(ch)) {
+        let j = i + 1;
+        while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j++;
+        const word = src.substring(i, j);
+        let cls;
+        if (HL_KEYWORDS.has(word))        cls = 'hl-kw';
+        else if (HL_NAMESPACES.has(word)) cls = 'hl-ns';
+        else if (HL_ROOTS.has(word))      cls = 'hl-root';
+        else if (src[j] === '(')          cls = 'hl-fn';     // followed by ( → function call
+        else                              cls = 'hl-ident';
+        push(cls, word);
+        i = j; continue;
+      }
+      // Operators & punctuation
+      if (/[+\-*/%=!<>&|^~?:.,;()\[\]{}]/.test(ch)) {
+        // Grab multi-char operators like ?:, ??, ==, !=, <=, >=, &&, ||, .!, ...
+        let j = i + 1;
+        const two = src.substring(i, i + 2);
+        if (['?:', '??', '==', '!=', '<=', '>=', '&&', '||', '.!'].includes(two)) j = i + 2;
+        const tok = src.substring(i, j);
+        const cls = /[()\[\]{}]/.test(ch) ? 'hl-paren' : 'hl-op';
+        push(cls, tok);
+        i = j; continue;
+      }
+      // Fallback: unknown char, emit plain
+      push('', ch); i++;
+    }
+    // Trailing newline so the pre always has at least one line-height worth of
+    // trailing space (matches the textarea's behavior for a trailing empty line).
+    return out.map(t => t.cls ? `<span class="${t.cls}">${esc(t.text)}</span>` : esc(t.text)).join('') + '\n';
+  }
+
+  function renderHighlight() {
+    const ta = document.getElementById('expr-input');
+    const pre = document.getElementById('expr-highlight');
+    if (!ta || !pre) return;
+    pre.innerHTML = highlightOEL(ta.value);
+    // Sync scroll offset so long expressions align.
+    pre.scrollTop  = ta.scrollTop;
+    pre.scrollLeft = ta.scrollLeft;
+  }
+
+  // ── Group Rule preview: run expression across a sample of real users ──
+  // Only enabled in the group_rules context. Fetches up to N users, evaluates
+  // the current expression against each one's profile + groups, and shows
+  // pass/fail counts plus a scrollable list of matches. Intent: validate that
+  // a rule captures the right users BEFORE saving it in Okta.
+  const GROUP_RULE_SAMPLE_SIZE = 100;   // covers 4 pages of 25 users each via Link:next
+  async function runGroupRulePreview() {
+    const btn     = document.getElementById('group-rule-run');
+    const sp      = document.getElementById('group-rule-spinner');
+    const errEl   = document.getElementById('group-rule-err');
+    const sumEl   = document.getElementById('group-rule-summary');
+    const listEl  = document.getElementById('group-rule-results');
+    if (!btn) return;
+
+    const expr = document.getElementById('expr-input')?.value.trim();
+    if (!expr) return;
+
+    btn.disabled = true;
+    sp?.classList.remove('hidden');
+    errEl?.classList.add('hidden');
+    if (sumEl) sumEl.classList.add('hidden');
+    if (listEl) listEl.innerHTML = '';
+
+    try {
+      // Paginated so the rule preview scales with tenant size.
+      const users = await fetchPaginated(`/api/v1/users?limit=25`, { maxPages: GROUP_RULE_SAMPLE_SIZE / 25 });
+
+      // Group fetches in parallel (bounded — the sample is small).
+      const withGroups = await Promise.all(users.map(async u => {
+        try {
+          const gr = await fetch(`/api/v1/users/${u.id}/groups?limit=200`, {
+            credentials:'include', headers:{'Accept':'application/json'},
+          });
+          const gs = gr.ok ? await gr.json() : [];
+          return { user: u, groups: gs.map(g => g.profile.name), groupIds: gs.map(g => g.id) };
+        } catch { return { user: u, groups: [], groupIds: [] }; }
+      }));
+
+      // Evaluate per user with a synthesized profile matching what the main
+      // evaluator expects. Reuses the ONE evaluator to avoid re-parsing.
+      const evaluator = new OELEvaluator({});
+      const matches = [];
+      let passed = 0, failed = 0, errored = 0;
+      for (const {user, groups, groupIds} of withGroups) {
+        const perProfile = {
+          user:     { ...user.profile, id: user.id, status: user.status,
+                       created: user.created, lastLogin: user.lastLogin },
+          appuser:  {},
+          idpuser:  {},
+          org:      state.profile.org,
+          app:      DEFAULT_PROFILE.app,
+          access:   DEFAULT_PROFILE.access,
+          groups, groupIds,
+          session:  DEFAULT_PROFILE.session,
+          security: DEFAULT_PROFILE.security,
+          device:   DEFAULT_PROFILE.device,
+        };
+        const res = evaluator.evaluate(expr, perProfile);
+        if (!res.success) { errored++; continue; }
+        if (res.result === true) { passed++; matches.push(user); }
+        else                     { failed++; }
+      }
+
+      if (sumEl) {
+        sumEl.innerHTML =
+          `<span class="gr-stat gr-pass">${passed} match${passed===1?'':'es'}</span>` +
+          `<span class="gr-stat gr-fail">${failed} no match</span>` +
+          (errored ? `<span class="gr-stat gr-err">${errored} error</span>` : '') +
+          `<span class="gr-note">sampled ${withGroups.length} of ${withGroups.length === GROUP_RULE_SAMPLE_SIZE ? 'first' : 'all'} users</span>`;
+        sumEl.classList.remove('hidden');
+      }
+      if (listEl) {
+        if (!matches.length) {
+          listEl.innerHTML = '<div class="no-results">No users in the sample matched this rule.</div>';
+        } else {
+          listEl.innerHTML = matches.map(u => {
+            const name = [u.profile.firstName, u.profile.lastName].filter(Boolean).join(' ') || u.profile.login;
+            const dept = u.profile.department ? ` · ${esc(u.profile.department)}` : '';
+            return `<div class="gr-user">
+              <div class="avatar ava-sm">${esc(inits(u.profile.firstName, u.profile.lastName))}</div>
+              <div class="result-info">
+                <div class="result-name">${esc(name)}</div>
+                <div class="result-sub">${esc(u.profile.email||u.profile.login)}${dept}</div>
+              </div>
+            </div>`;
+          }).join('');
+        }
+      }
+    } catch (e) {
+      if (errEl) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
+    } finally {
+      btn.disabled = false;
+      sp?.classList.add('hidden');
+    }
+  }
 
   // ── Tabs ──────────────────────────────────────────────────────
   function switchTab(name) {
@@ -793,7 +1368,88 @@
   function switchContext(id) {
     state.ctx = id; sl(LS.CTX, id);
     refreshChips();   // rebuilds var-tabs for the new context
+    updateAppPickerVisibility();
     scheduleEval();
+  }
+
+  // The app picker is only useful in contexts whose expression scope actually
+  // includes app or appuser. Group Rules, IdP Attribute Mapping, App Sign-On
+  // Policy, and Access Certification don't reference either — hiding the row
+  // there recovers ~40px of vertical space for the Quick Insert chips.
+  function contextUsesApp() {
+    const ctx = CONTEXTS.find(c => c.id === state.ctx) || CONTEXTS[0];
+    const vars = ctx.vars || ['user'];
+    return vars.includes('app') || vars.includes('appuser');
+  }
+  function updateAppPickerVisibility() {
+    const row   = document.querySelector('.app-ctrl')?.closest('.ctrl-row');
+    const panel = document.getElementById('app-search-panel');
+    const show  = contextUsesApp();
+    if (row)   row.classList.toggle('hidden', !show);
+    if (!show && panel) panel.classList.add('hidden');   // also collapse the search panel if open
+
+    // Re-render the selected-app card so its "wrong type" pill updates.
+    rebuildAppControls();
+    // If the search panel is open, re-run the last query so results are re-filtered
+    // for the new context.
+    if (panel && !panel.classList.contains('hidden')) {
+      const q = document.getElementById('app-query')?.value.trim() || '';
+      scheduleAppSearch(q);
+    }
+
+    // Policy preset row only makes sense in App Sign-On Policy context.
+    const presetRow = document.getElementById('policy-preset-row');
+    if (presetRow) presetRow.classList.toggle('hidden', state.ctx !== 'app_sign_on');
+
+    // Output-section tabs — show only those relevant to the current context.
+    updateOutputTabs();
+  }
+
+  // Show/hide output tabs based on context, and switch to a still-visible tab
+  // if the currently selected one is no longer available. Also relabels the
+  // token tab + inner controls so SAML sees "Assertion Preview / attribute
+  // name" and doesn't see the OIDC-specific token-type / auth-server pickers.
+  function updateOutputTabs() {
+    const tokenTab = document.getElementById('otab-token');
+    const ruleTab  = document.getElementById('otab-rule');
+    const showToken = state.ctx === 'oauth_claims' || state.ctx === 'saml';
+    const showRule  = state.ctx === 'group_rules';
+    if (tokenTab) tokenTab.classList.toggle('hidden', !showToken);
+    if (ruleTab)  ruleTab.classList.toggle('hidden',  !showRule);
+
+    // OIDC-only controls: token type + auth server. Hide entirely in SAML.
+    const isSaml = state.ctx === 'saml';
+    const tokenTypeSel = document.getElementById('token-type-select');
+    const authSrvSel   = document.getElementById('auth-server-select');
+    if (tokenTypeSel) tokenTypeSel.classList.toggle('hidden', isSaml);
+    if (authSrvSel)   authSrvSel.classList.toggle('hidden',   isSaml);
+
+    // Relabel the tab + placeholder text to match the artifact being previewed.
+    if (tokenTab) {
+      tokenTab.textContent = isSaml ? 'Assertion Preview' : 'Token Preview';
+    }
+    const claimName = document.getElementById('token-claim-name');
+    if (claimName) {
+      claimName.placeholder = isSaml ? 'attribute name' : 'claim name';
+      // Update default only when the input is still holding the other mode's default.
+      if (claimName.value === 'customClaim' && isSaml)      claimName.value = 'customAttribute';
+      if (claimName.value === 'customAttribute' && !isSaml) claimName.value = 'customClaim';
+    }
+
+    // If the current tab has been hidden, fall back to 'result'.
+    if (state.outputTab === 'token' && !showToken) state.outputTab = 'result';
+    if (state.outputTab === 'rule'  && !showRule)  state.outputTab = 'result';
+    setOutputTab(state.outputTab);
+  }
+
+  function setOutputTab(name) {
+    state.outputTab = name;
+    document.querySelectorAll('.output-tab').forEach(b =>
+      b.classList.toggle('output-tab-on', b.dataset.otab === name));
+    document.querySelectorAll('.output-pane').forEach(p =>
+      p.classList.toggle('hidden', p.id !== `opane-${name}`));
+    // Refresh dynamic content on tab switch so the pane reflects the latest state.
+    if (name === 'token') scheduleEval();
   }
 
   // ── User search ───────────────────────────────────────────────
@@ -810,21 +1466,168 @@
     document.getElementById('user-api-err')?.classList.add('hidden');
   }
 
+  // Extract the `next` page URL (if any) from an Okta response's Link header.
+  // Okta uses standard RFC 5988 Link headers: `Link: <url>; rel="next", <url>; rel="self"`.
+  //
+  // IMPORTANT: Okta returns absolute URLs pointing at the org's *user-facing*
+  // domain (e.g. https://tenant.okta.com), but the admin console runs on
+  // tenant-admin.okta.com. Following the absolute URL triggers CORS and gets
+  // rejected. We strip the URL to just its path+query so the browser resolves
+  // it relative to the current admin origin (which does have a valid session).
+  function parseNextLink(resp) {
+    const raw = resp.headers.get('link') || resp.headers.get('Link');
+    if (!raw) return null;
+    for (const part of raw.split(',')) {
+      const m = part.match(/<([^>]+)>\s*;\s*rel="?next"?/);
+      if (m) {
+        try {
+          const u = new URL(m[1]);
+          return u.pathname + u.search;
+        } catch {
+          return m[1];   // not a valid URL — hand back verbatim
+        }
+      }
+    }
+    return null;
+  }
+
+  // Follow Link: next headers up to `maxPages` pages, concatenating results.
+  // Okta returns arrays for the endpoints we use, so we can flat-map safely.
+  // maxPages caps runaway loops on huge tenants — the UI is designed around
+  // interactive search, not full-tenant scans.
+  async function fetchPaginated(url, { maxPages = 5, onProgress } = {}) {
+    const opts = { credentials:'include', headers:{'Accept':'application/json'} };
+    let next  = url;
+    let pages = 0;
+    let all   = [];
+    while (next && pages < maxPages) {
+      const r = await fetch(next, opts);
+      if (r.status===401||r.status===403) throw new Error('Not authorised — make sure you are signed in to the Okta Admin Console.');
+      if (!r.ok) throw new Error(`Okta API ${r.status}: ${r.statusText}`);
+      const chunk = await r.json();
+      if (!Array.isArray(chunk)) return chunk;   // non-list endpoint — bail out
+      all = all.concat(chunk);
+      onProgress?.(all.length, pages + 1);
+      next = parseNextLink(r);
+      pages++;
+    }
+    return all;
+  }
+
   async function fetchUsers(q) {
-    const r = await fetch(`/api/v1/users?limit=10&q=${encodeURIComponent(q)}`, {
-      credentials:'include', headers:{'Accept':'application/json'},
-    });
-    if (r.status===401||r.status===403) throw new Error('Not authorised — make sure you are signed in to the Okta Admin Console.');
-    if (!r.ok) throw new Error(`Okta API ${r.status}: ${r.statusText}`);
-    return r.json();
+    // Search endpoint. Bumped page size to 25; up to 4 pages = ~100 candidates
+    // — plenty for the picker without stalling on huge tenants.
+    return fetchPaginated(`/api/v1/users?limit=25&q=${encodeURIComponent(q)}`, { maxPages: 4 });
   }
 
   async function fetchUserGroups(uid) {
-    const r = await fetch(`/api/v1/users/${uid}/groups?limit=200`, {
+    // Follow pagination so users in >200 groups still get their full list.
+    return fetchPaginated(`/api/v1/users/${uid}/groups?limit=200`, { maxPages: 10 });
+  }
+
+  // Fetch a single user by id. Used to resolve manager profiles so expressions
+  // like getManagerUser(user).email return real values rather than a derived
+  // best-guess split of user.manager.
+  async function fetchUserById(uid) {
+    if (!uid) return null;
+    try {
+      const r = await fetch(`/api/v1/users/${encodeURIComponent(uid)}`, {
+        credentials:'include', headers:{'Accept':'application/json'},
+      });
+      if (!r.ok) return null;
+      const j = await r.json();
+      return { ...j.profile, id: j.id, status: j.status };
+    } catch { return null; }
+  }
+
+  async function fetchApps(q) {
+    // Okta's /api/v1/apps `q` is a starts-with filter on label/name/user-visible name (case-insensitive).
+    // When no query is provided we list the tenant's apps so directory sources (AD, LDAP)
+    // — which have names like `active_directory`, `ldap_interface` and often no label
+    // that starts with what the user would type — are still discoverable.
+    // Paginated: 4 pages × 50 = up to 200 apps for tenants with many apps.
+    const query = q ? `&q=${encodeURIComponent(q)}` : '';
+    return fetchPaginated(`/api/v1/apps?limit=50${query}`, { maxPages: 4 });
+  }
+
+  async function fetchAppUser(appId, userId) {
+    // Returns the app-user assignment profile (real appuser attributes) or null when
+    // the user isn't assigned to this app (404 is the expected "unassigned" response).
+    const r = await fetch(`/api/v1/apps/${appId}/users/${userId}`, {
       credentials:'include', headers:{'Accept':'application/json'},
     });
-    if (!r.ok) throw new Error(`Groups fetch error: ${r.status}`);
+    if (r.status === 404) return null;
+    if (r.status===401||r.status===403) throw new Error('Not authorised — make sure you are signed in to the Okta Admin Console.');
+    if (!r.ok) throw new Error(`App-user fetch error: ${r.status}`);
     return r.json();
+  }
+
+  // Fetch the Okta user schema — reveals all declared attributes on the org's
+  // user profile (custom fields), so Quick Insert can show what CAN be
+  // referenced rather than only what happens to have a value on the picked user.
+  async function fetchUserSchema() {
+    try {
+      const r = await fetch('/api/v1/meta/schemas/user/default', {
+        credentials:'include', headers:{'Accept':'application/json'},
+      });
+      if (!r.ok) return null;
+      const j = await r.json();
+      // Merge base + custom properties into a flat name→null map.
+      const props = {
+        ...(j.definitions?.base?.properties   || {}),
+        ...(j.definitions?.custom?.properties || {}),
+      };
+      const attrs = {};
+      for (const name of Object.keys(props)) attrs[name] = null;
+      return attrs;
+    } catch { return null; }
+  }
+
+  async function fetchAppSchema(appId) {
+    try {
+      const r = await fetch(`/api/v1/meta/schemas/apps/${appId}/default`, {
+        credentials:'include', headers:{'Accept':'application/json'},
+      });
+      if (!r.ok) return null;
+      const j = await r.json();
+      const props = {
+        ...(j.definitions?.base?.properties   || {}),
+        ...(j.definitions?.custom?.properties || {}),
+      };
+      const attrs = {};
+      for (const name of Object.keys(props)) attrs[name] = null;
+      return attrs;
+    } catch { return null; }
+  }
+
+  // Authorization servers — includes the org auth server ("default") plus any
+  // custom ones the tenant has set up. Used to drive the token-preview picker
+  // and to fetch each server's claim mappings.
+  async function fetchAuthServers() {
+    try {
+      const list = await fetchPaginated('/api/v1/authorizationServers?limit=100', { maxPages: 5 });
+      if (!Array.isArray(list)) return [];
+      // Ensure the org auth server is present. Different tenants surface it
+      // differently — some include an entry with id="default" in the list,
+      // some don't. Add a synthetic entry if it's missing.
+      const hasOrg = list.some(s => s.id === 'default' || /org authorization server/i.test(s.name || ''));
+      if (!hasOrg) {
+        const tokenHost = window.location.hostname.replace(/-admin\./, '.');
+        list.unshift({ id: 'default', name: 'Org Authorization Server', audiences: [`https://${tokenHost}`], _synthetic: true });
+      }
+      return list;
+    } catch { return []; }
+  }
+
+  async function fetchAuthServerClaims(authServerId) {
+    if (!authServerId) return [];
+    try {
+      const list = await fetchPaginated(
+        `/api/v1/authorizationServers/${encodeURIComponent(authServerId)}/claims?limit=200`,
+        { maxPages: 5 }
+      );
+      return Array.isArray(list) ? list : [];
+    } catch { return []; }
   }
 
   async function fetchOrgInfo() {
@@ -834,8 +1637,11 @@
       });
       if (!r.ok) return;
       const data = await r.json();
-      // Update the org context in the active profile with real values
+      // Update the org context in the active profile with real values.
+      // `id` (the 00o... org identifier) is what Okta emits as the `idp` claim
+      // in ID tokens when the user authenticates via Okta directly.
       const org = {
+        id:        data.id        || state.profile.org.id,
         name:      data.name      || state.profile.org.name,
         subDomain: data.subdomain || window.location.hostname.split('.')[0],
       };
@@ -884,42 +1690,12 @@
         statusChanged:   u.statusChanged,
       };
 
-      // ── appuser: derived from the real profile.
-      // When AD is the source, attribute names differ (mail vs email, sn vs lastName, etc.).
-      // We derive as much as possible; AD-only fields we can't fetch are kept as mock.
-      const realAppuser = {
-        // Base Okta profile attributes
-        ...rp,
-        // LDAP / AD attribute names derived from Okta profile
-        sAMAccountName:    rp.samAccountName
-                           || rp.login?.split('@')[0]
-                           || rp.email?.split('@')[0],
-        userPrincipalName: rp.userPrincipalName || rp.login || rp.email,
-        mail:              rp.email,
-        mailNickname:      rp.login?.split('@')[0] || rp.email?.split('@')[0],
-        givenName:         rp.firstName,
-        sn:                rp.lastName,
-        cn:                [rp.firstName, rp.lastName].filter(Boolean).join(' '),
-        displayName:       rp.displayName
-                           || [rp.lastName, rp.firstName].filter(Boolean).join(', '),
-        department:        rp.department,
-        title:             rp.title,
-        company:           rp.organization,
-        telephoneNumber:   rp.primaryPhone,
-        mobile:            rp.mobilePhone,
-        streetAddress:     rp.streetAddress,
-        l:                 rp.city,
-        st:                rp.state,
-        postalCode:        rp.zipCode,
-        c:                 rp.countryCode,
-        employeeID:        rp.employeeNumber,
-        employeeType:      rp.userType || rp.workerType,
-        // Copy any extensionAttributes the user may have on their Okta profile
-        extensionAttribute1:  rp.extensionAttribute1  ?? DEFAULT_PROFILE.appuser.extensionAttribute1,
-        extensionAttribute2:  rp.extensionAttribute2  ?? null,
-        // memberOf cannot be fetched without an AD lookup — keep mock but note it
-        memberOf: DEFAULT_PROFILE.appuser.memberOf,
-      };
+      // ── appuser: a real user's appuser is meaningful only in the context
+      // of an assigned application. Without a valid app assignment we can't
+      // fabricate values (they'd be lies that don't reflect any real app's
+      // schema), so appuser is null-shaped. When an app IS selected below
+      // we replace this with the real assignment data.
+      const realAppuser = emptyAppuser();
 
       // ── idpuser: what an external IdP would send for this person.
       // We use the real Okta attributes (since they often match what the IdP sent),
@@ -942,38 +1718,55 @@
         appuser:  realAppuser,
         idpuser:  realIdpuser,
         apps:     DEFAULT_PROFILE.apps,
-        app:      DEFAULT_PROFILE.app,
+        app:      state.selectedApp ? state.profile.app : DEFAULT_PROFILE.app,
         access:   DEFAULT_PROFILE.access,
+        manager:  null,   // will be filled below if the user has a managerId
         // Use org info already populated by fetchOrgInfo (real name + subdomain)
         org: state.profile.org,
         groups:   groups.map(g => g.profile.name),
         groupIds: groups.map(g => g.id),
-        session:  DEFAULT_PROFILE.session,
-        security: DEFAULT_PROFILE.security,
-        device:   DEFAULT_PROFILE.device,
+        session:  state.profile.session  || DEFAULT_PROFILE.session,
+        security: state.profile.security || DEFAULT_PROFILE.security,
+        device:   state.profile.device   || DEFAULT_PROFILE.device,
       };
 
       state.selectedUser = u;
       state.evaluator    = new OELEvaluator(state.profile);
 
-      // Rebuild the user controls section
-      rebuildUserControls();
+      // Fire manager fetch + assignment lookup in parallel — both are optional.
+      const [manager] = await Promise.all([
+        fetchUserById(rp.managerId),
+        state.selectedApp ? hydrateAppuserFromAssignment() : Promise.resolve(),
+      ]);
+      if (manager) {
+        state.profile = { ...state.profile, manager };
+        state.evaluator = new OELEvaluator(state.profile);
+      }
       closeUserSearch();
-      refreshChips();
-      scheduleEval();
     } catch (e) {
       const errEl = document.getElementById('user-api-err');
       if (errEl) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
     } finally {
       if (sp) sp.classList.add('hidden');
+      try { rebuildUserControls(); } catch {}
+      try { rebuildAppControls(); }  catch {}
+      try { refreshChips(); }        catch {}
+      scheduleEval();
     }
   }
 
   function clearSelectedUser() {
-    state.selectedUser = null;
-    state.profile      = DEFAULT_PROFILE;
-    state.evaluator    = new OELEvaluator(DEFAULT_PROFILE);
+    state.selectedUser  = null;
+    state.appAssignment = 'unknown';
+    // Reset profile to defaults, but preserve any selected app + org info.
+    state.profile = {
+      ...DEFAULT_PROFILE,
+      app: state.selectedApp ? state.profile.app : DEFAULT_PROFILE.app,
+      org: state.profile.org,
+    };
+    state.evaluator = new OELEvaluator(state.profile);
     rebuildUserControls();
+    rebuildAppControls();
     refreshChips();
     scheduleEval();
   }
@@ -1002,6 +1795,264 @@
         </button>`;
       document.getElementById('user-search-btn')?.addEventListener('click', openUserSearch);
     }
+  }
+
+  // ── App-user shape helper ─────────────────────────────────────
+  // A real user without a valid app assignment has NO appuser at all — not
+  // even a null-shape schema. Any appuser.* reference must resolve to null,
+  // and the Quick Insert chip list should show "No attributes for appuser".
+  // We never invent appuser attributes; only real assignment data populates it.
+  function emptyAppuser() {
+    return {};
+  }
+
+  // ── App selection ─────────────────────────────────────────────
+  function buildAppLineHTML() {
+    if (!state.selectedApp) {
+      return `<button id="app-search-btn" class="user-empty-btn">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        Using mock app — click to search org
+      </button>`;
+    }
+    const a = state.selectedApp;
+    // Some apps (esp. directory sources) only have a name; some SWA/OIDC apps only have a label.
+    const label = a.label || a.name || 'App';
+    const mode  = a.signOnMode || '';
+    const parts = String(label).split(/[\s_-]+/).filter(Boolean);
+    // "Assignment" pill only meaningful when a user is also selected.
+    let assignPill = '';
+    if (state.selectedUser) {
+      assignPill = state.appAssignment === 'assigned'
+        ? `<span class="app-assign app-assign-ok" title="This user is assigned to this app">assigned</span>`
+        : state.appAssignment === 'unassigned'
+          ? `<span class="app-assign app-assign-warn" title="This user is not assigned to this app — every appuser attribute evaluates to null">not assigned</span>`
+          : '';
+    }
+    // Warn if the selected app's sign-on mode doesn't fit the current context.
+    let mismatchPill = '';
+    const filter = contextAppFilter(state.ctx);
+    if (filter && !appMatchesContext(a, state.ctx)) {
+      mismatchPill = `<span class="app-assign app-assign-warn" title="This is a ${mode} app, but the current context requires ${filter.label}. Pick a different app.">wrong type</span>`;
+    }
+    return `<div class="user-selected app-selected">
+      <div class="avatar app-avatar">${esc(inits(parts[0], parts[1]))}</div>
+      <div class="user-info">
+        <span class="user-name">${esc(label)}</span>
+        <span class="user-email">${esc(mode)}${assignPill}${mismatchPill}</span>
+      </div>
+      <button id="app-change" class="btn-xs btn-ghost">Change</button>
+    </div>`;
+  }
+
+  function openAppSearch() {
+    state.searchOpen = true;
+    document.getElementById('app-search-panel')?.classList.remove('hidden');
+    document.getElementById('app-query')?.focus();
+    document.getElementById('app-api-err')?.classList.add('hidden');
+    // Pre-populate with the tenant's apps so directory sources (AD, LDAP)
+    // are visible without knowing an exact prefix.
+    scheduleAppSearch('');
+  }
+  function closeAppSearch() {
+    state.searchOpen = false;
+    document.getElementById('app-search-panel')?.classList.add('hidden');
+    document.getElementById('app-api-err')?.classList.add('hidden');
+  }
+
+  function isDirectoryApp(a) {
+    // Okta's app `name` for directory sources uses stable slugs.
+    const n = (a.name || '').toLowerCase();
+    return n === 'active_directory' || n.startsWith('ldap') || n === 'okta_org2org';
+  }
+
+  // Which sign-on modes are meaningful in the current expression context.
+  // Returns an array of predicates that match Okta's signOnMode values.
+  function contextAppFilter(ctx) {
+    if (ctx === 'oauth_claims') return { modes: ['OPENID_CONNECT'], label: 'OIDC' };
+    if (ctx === 'saml')         return { modes: ['SAML_2_0', 'SAML_1_1'], label: 'SAML' };
+    if (ctx === 'inline_hook')  return { modes: ['OPENID_CONNECT', 'SAML_2_0', 'SAML_1_1'], label: 'OIDC or SAML' };
+    return null;   // all other contexts accept any app
+  }
+  function appMatchesContext(a, ctx) {
+    const f = contextAppFilter(ctx);
+    if (!f) return true;
+    return f.modes.includes(a.signOnMode);
+  }
+
+  function renderAppResults(apps) {
+    const el = document.getElementById('app-results');
+    if (!el) return;
+
+    // Context-aware filtering: hide apps whose sign-on mode doesn't apply to
+    // the current expression context. E.g. only OIDC apps in OAuth Claims.
+    const filter = contextAppFilter(state.ctx);
+    const shown  = filter ? apps.filter(a => appMatchesContext(a, state.ctx)) : apps;
+    const hiddenCount = apps.length - shown.length;
+
+    let header = '';
+    if (filter) {
+      header = `<div class="app-filter-hint">Showing ${filter.label} apps only for this context` +
+               (hiddenCount ? ` · ${hiddenCount} other app${hiddenCount===1?'':'s'} hidden` : '') +
+               `</div>`;
+    }
+
+    if (!shown.length) {
+      el.innerHTML = header + `<div class="no-results">No ${filter ? filter.label + ' ' : ''}apps found</div>`;
+      return;
+    }
+    el.innerHTML = header + shown.map(a => {
+      const label = a.label || a.name || '(unnamed)';
+      const sc    = a.status==='ACTIVE' ? 'status-active' : 'status-other';
+      const mode  = a.signOnMode ? ` · ${esc(a.signOnMode)}` : '';
+      const init  = (label || '?').trim()[0]?.toUpperCase() || '?';
+      const dir   = isDirectoryApp(a) ? '<span class="status-pill app-dir-pill">directory</span>' : '';
+      return `<button class="user-result" data-a="${esc(JSON.stringify(a))}">
+        <div class="avatar ava-sm app-avatar">${esc(init)}</div>
+        <div class="result-info">
+          <div class="result-name">${esc(label)} ${dir}</div>
+          <div class="result-sub">${esc(a.name || '')}<span class="status-pill ${sc}">${esc(a.status)}</span>${mode}</div>
+        </div>
+      </button>`;
+    }).join('');
+  }
+
+  // Hydrate state.profile.app from an Okta /api/v1/apps entry.
+  //   - clientId: real for OIDC apps, empty otherwise (matches Okta server behavior)
+  //   - profile: merges the app's settings.app (custom app profile schema) so
+  //     `app.<customField>` expressions can be tested against real tenant data.
+  function buildAppContext(a) {
+    const isOidc   = a.signOnMode && a.signOnMode.startsWith('OPENID');
+    const clientId = isOidc ? (a.settings?.oAuthClient?.client_id ?? a.settings?.oauthClient?.client_id ?? a.credentials?.oauthClient?.client_id ?? '') : '';
+    const appProfile = {
+      label: a.label || a.name || '',
+      ...(a.settings?.app || {}),   // any custom app-level profile properties defined on the app
+    };
+    return {
+      id:         a.id,
+      name:       a.name,
+      label:      a.label,
+      signOnMode: a.signOnMode,
+      status:     a.status,
+      clientId,
+      profile:    appProfile,
+    };
+  }
+
+  async function hydrateAppuserFromAssignment() {
+    // Only attempt when we have both a real user and a real app selected.
+    if (!state.selectedUser || !state.selectedApp) {
+      state.appAssignment = 'unknown';
+      return;
+    }
+    try {
+      const assignment = await fetchAppUser(state.selectedApp.id, state.selectedUser.id);
+      if (assignment) {
+        // Replace appuser with the ACTUAL app-user data for this app.
+        // No merging with derived-from-Okta-profile fields — those don't belong
+        // to this app and would mislead expression testing.
+        const real = {
+          ...(assignment.profile || {}),
+        };
+        // Top-level metadata fields that Okta expressions commonly reference.
+        if (assignment.credentials?.userName) real.userName   = assignment.credentials.userName;
+        if (assignment.externalId != null)    real.externalId = assignment.externalId;
+        if (assignment.status)                real.status     = assignment.status;
+        if (assignment.syncState)             real.syncState  = assignment.syncState;
+        if (assignment.lastSync)              real.lastSync   = assignment.lastSync;
+        if (assignment.created)               real.created    = assignment.created;
+        if (assignment.lastUpdated)           real.lastUpdated = assignment.lastUpdated;
+        if (assignment.passwordChanged)       real.passwordChanged = assignment.passwordChanged;
+        state.profile = { ...state.profile, appuser: real };
+        state.appAssignment = 'assigned';
+      } else {
+        // Unassigned — the user has no app-user profile for this app, so
+        // every appuser.* reference must resolve to null (that's what would
+        // happen at runtime in Okta too). Show the shape with all null values.
+        state.profile = { ...state.profile, appuser: emptyAppuser() };
+        state.appAssignment = 'unassigned';
+      }
+    } catch (e) {
+      // Non-fatal — leave appuser as-is and surface via the api-err element on the app panel.
+      const errEl = document.getElementById('app-api-err');
+      if (errEl) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
+      state.appAssignment = 'unknown';
+    }
+    state.evaluator = new OELEvaluator(state.profile);
+  }
+
+  async function selectApp(a) {
+    const sp = document.getElementById('app-spinner');
+    if (sp) sp.classList.remove('hidden');
+    try {
+      state.selectedApp = a;
+      state.profile = { ...state.profile, app: buildAppContext(a) };
+      state.evaluator = new OELEvaluator(state.profile);
+      // Fire schema + assignment fetch in parallel — schema is orthogonal
+      // to whether the user is actually assigned to the app.
+      const [schema] = await Promise.all([
+        fetchAppSchema(a.id),
+        hydrateAppuserFromAssignment(),
+      ]);
+      state.appSchema = schema;
+      closeAppSearch();
+    } catch (e) {
+      const errEl = document.getElementById('app-api-err');
+      if (errEl) { errEl.textContent = e.message; errEl.classList.remove('hidden'); }
+    } finally {
+      if (sp) sp.classList.add('hidden');
+      // Always re-render UI + chips, even if an earlier step threw, so the
+      // Quick Insert section doesn't get left in a stale state.
+      try { rebuildAppControls(); } catch {}
+      try { refreshChips(); }      catch {}
+      scheduleEval();
+    }
+  }
+
+  function clearSelectedApp() {
+    state.selectedApp   = null;
+    state.appAssignment = 'unknown';
+    state.appSchema     = null;
+    // Restore mock app; appuser depends on whether we have a real user or not:
+    //   - Real user: no app → no valid appuser (all null)
+    //   - Mock user: fall back to the mock appuser
+    const newAppuser = state.selectedUser ? emptyAppuser() : DEFAULT_PROFILE.appuser;
+    state.profile = { ...state.profile, app: DEFAULT_PROFILE.app, appuser: newAppuser };
+    state.evaluator = new OELEvaluator(state.profile);
+    rebuildAppControls();
+    refreshChips();
+    scheduleEval();
+  }
+
+  function rebuildAppControls() {
+    const wrap = document.querySelector('.app-ctrl');
+    if (!wrap) return;
+    wrap.innerHTML = buildAppLineHTML();
+    if (state.selectedApp) {
+      document.getElementById('app-change')?.addEventListener('click', () => { clearSelectedApp(); });
+    } else {
+      document.getElementById('app-search-btn')?.addEventListener('click', openAppSearch);
+    }
+  }
+
+  function scheduleAppSearch(q) {
+    clearTimeout(state.appSearchTimer);
+    const res = document.getElementById('app-results');
+    const err = document.getElementById('app-api-err');
+    // No 2-char minimum: empty query lists the tenant's first 20 apps,
+    // 1 char matches short directory-source names (e.g. "l" → ldap_interface).
+    state.appSearchTimer = setTimeout(async () => {
+      const sp = document.getElementById('app-spinner');
+      if (sp) sp.classList.remove('hidden');
+      try {
+        renderAppResults(await fetchApps(q));
+        if (err) err.classList.add('hidden');
+      } catch (e) {
+        if (res) res.innerHTML='';
+        if (err) { err.textContent=e.message; err.classList.remove('hidden'); }
+      } finally {
+        if (sp) sp.classList.add('hidden');
+      }
+    }, 250);
   }
 
   function refreshChips() {
@@ -1048,11 +2099,413 @@
     }, 350);
   }
 
+  // ── Editor autocomplete ───────────────────────────────────────
+  // Triggered by typing `.` after a known root identifier. Shows a floating
+  // list of completions and inserts on Enter/Tab/click. Roots include profile
+  // objects (user, appuser, etc.), function namespaces (String, Arrays, ...),
+  // and nested paths (app.profile.x → keys of state.profile.app.profile).
+  const AC_ROOTS = new Set([
+    'user', 'appuser', 'idpuser', 'app', 'access', 'org',
+    'device', 'session', 'security', 'groups',
+    'String', 'Arrays', 'Time', 'Convert', 'Iso3166Convert', 'DateTime', 'Groups',
+  ]);
+
+  // Map function-namespace roots to their function names (short form, no signature).
+  function acFunctionNames(ns) {
+    const nsEntry = FUNCTION_REFERENCE.find(x => x.ns === ns || (ns === 'Groups' && x.ns === 'Groups & User'));
+    if (!nsEntry) return [];
+    return nsEntry.fns
+      .map(f => f.sig.split('(')[0])
+      .filter(name => name.startsWith(ns + '.'))
+      .map(name => name.substring(ns.length + 1));
+  }
+
+  // Resolve a dotted path like "app.profile" against state.profile. Returns
+  // the value at that path (may be an object, array, string, etc.), or null
+  // if the path can't be resolved.
+  function resolveValuePath(path) {
+    const parts = path.split('.');
+    if (!AC_ROOTS.has(parts[0])) return null;
+    let cur = state.profile[parts[0]];
+    if (cur == null) return null;
+    for (let i = 1; i < parts.length; i++) {
+      cur = cur?.[parts[i]];
+      if (cur == null) return null;
+    }
+    return cur;
+  }
+
+  // Backwards-compat wrapper — returns the value only if it's a non-array object
+  // whose keys should be enumerated as attribute completions.
+  function resolveObjectPath(path) {
+    const v = resolveValuePath(path);
+    if (v == null || typeof v !== 'object' || Array.isArray(v)) return null;
+    return v;
+  }
+
+  // Identity Engine method-style completions available on string values.
+  // Only Okta-documented OEL / IE methods — no invented aliases.
+  const STRING_METHOD_COMPLETIONS = [
+    'substringBefore', 'substringAfter', 'substring',
+    'toUpperCase', 'toLowerCase', 'trim',
+    'replace', 'replaceFirst', 'startsWith',
+    'parseStringTime',
+  ];
+
+  // Method completions on ZonedDateTime-like values (results of parseStringTime,
+  // DateTime.now(), etc.). We can't detect these values from the profile without
+  // executing, but users chain them after other calls — signature help will
+  // still work in that case.
+  const DATETIME_METHOD_COMPLETIONS = [
+    'withinDays', 'plusDays', 'toString',
+  ];
+
+  // Return {items, replaceStart} or null if no autocomplete should show.
+  function computeAutocomplete(text, caret) {
+    // Grab everything up to caret; scan back to a `.` preceded by an identifier.
+    // Match `<identifier(.identifier)*>.<optional partial>` immediately before caret.
+    const upto = text.substring(0, caret);
+    const m = upto.match(/([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\.([A-Za-z_][A-Za-z0-9_]*)?$/);
+    if (!m) return null;
+    const chain   = m[1];      // e.g. "user" or "app.profile"
+    const partial = m[2] || '';
+    const rootIdent = chain.split('.')[0];
+    if (!AC_ROOTS.has(rootIdent)) return null;
+
+    let candidates = [];
+    let completionKind = 'attribute';   // 'attribute' | 'function' | 'method'
+    // Function namespaces short-circuit — only their functions apply, and
+    // only at the first level (String.foo, not String.foo.bar).
+    if (['String','Arrays','Time','Convert','Iso3166Convert','DateTime','Groups'].includes(rootIdent) && chain === rootIdent) {
+      candidates = acFunctionNames(rootIdent);
+      completionKind = 'function';
+    } else {
+      const obj = resolveObjectPath(chain);
+      if (obj) candidates = Object.keys(obj);
+      // For `user.` and `appuser.` also merge in schema keys (declared attrs
+      // even if not currently populated).
+      if (chain === 'user'    && state.userSchema) candidates = [...new Set([...candidates, ...Object.keys(state.userSchema)])];
+      if (chain === 'appuser' && state.appSchema)  candidates = [...new Set([...candidates, ...Object.keys(state.appSchema)])];
+      // Method chaining: if the chain resolves to a STRING, offer Identity
+      // Engine method-style completions like `.substringBefore(...)`.
+      if (!candidates.length) {
+        const val = resolveValuePath(chain);
+        if (typeof val === 'string') {
+          candidates = STRING_METHOD_COMPLETIONS.slice();
+          completionKind = 'method';
+        }
+      }
+    }
+
+    // Filter by partial (case-insensitive) and rank prefix-match above contains.
+    const p = partial.toLowerCase();
+    const scored = candidates
+      .filter(c => !p || c.toLowerCase().includes(p))
+      .map(c => ({
+        name: c,
+        rank: p && c.toLowerCase().startsWith(p) ? 0 : (p ? 1 : 0),
+      }))
+      .sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name))
+      .slice(0, 40);
+
+    if (!scored.length) return null;
+    return {
+      items: scored.map(s => s.name),
+      replaceStart: caret - partial.length,
+      chain,
+      kind: completionKind,
+    };
+  }
+
+  const acState = { items: [], index: 0, replaceStart: 0, open: false, chain: '', kind: 'attribute' };
+
+  // Format a value for the right-side hint column in the completion list.
+  // Kept short — this is a peek, not a full read. Full-width truncation at 32.
+  function acFormatHint(chain, name, kind) {
+    if (kind === 'function' || kind === 'method') {
+      // For function completions, show a signature snippet from FUNCTION_REFERENCE.
+      const fqName = chain + '.' + name;
+      let sig = SIG_INDEX.get(fqName);
+      if (!sig && kind === 'method') {
+        // Method chaining: look up the plain method name (matches String.<method>).
+        sig = SIG_INDEX.get('String.' + name) || SIG_INDEX.get('Time.' + name);
+      }
+      if (sig) {
+        const p = sig.params.map(x => x.label).join(', ');
+        return `<span class="ac-hint-sig">(${esc(p)})</span>`;
+      }
+      return `<span class="ac-hint-sig">()</span>`;
+    }
+    // Attribute: pull the current value from the profile.
+    const parent = resolveValuePath(chain);
+    const v = parent && typeof parent === 'object' ? parent[name] : undefined;
+    if (v === null || v === undefined) return `<span class="ac-hint-null">null</span>`;
+    if (Array.isArray(v))               return `<span class="ac-hint-arr">[${v.length} item${v.length===1?'':'s'}]</span>`;
+    if (typeof v === 'boolean')         return `<span class="ac-hint-bool">${v}</span>`;
+    if (typeof v === 'number')          return `<span class="ac-hint-num">${v}</span>`;
+    if (typeof v === 'object')          return `<span class="ac-hint-obj">{…}</span>`;
+    const s = String(v);
+    const shown = s.length > 32 ? s.substring(0, 32) + '…' : s;
+    return `<span class="ac-hint-str">"${esc(shown)}"</span>`;
+  }
+
+  // Compute the caret's pixel offset within the textarea using a mirror div.
+  // Returns { x, y } relative to the textarea's top-left corner.
+  function measureCaret(ta) {
+    const style = window.getComputedStyle(ta);
+    const mirror = document.createElement('div');
+    // Copy every layout-affecting property so the mirror wraps identically.
+    for (const p of ['fontFamily','fontSize','fontWeight','fontStyle','letterSpacing',
+                     'lineHeight','textTransform','wordSpacing','whiteSpace',
+                     'paddingTop','paddingRight','paddingBottom','paddingLeft',
+                     'borderTopWidth','borderRightWidth','borderBottomWidth','borderLeftWidth',
+                     'boxSizing','tabSize']) {
+      mirror.style[p] = style[p];
+    }
+    mirror.style.position   = 'absolute';
+    mirror.style.visibility = 'hidden';
+    mirror.style.whiteSpace = 'pre-wrap';
+    mirror.style.wordWrap   = 'break-word';
+    mirror.style.width      = ta.clientWidth + 'px';
+    mirror.style.overflow   = 'hidden';
+    mirror.textContent = ta.value.substring(0, ta.selectionEnd);
+    const marker = document.createElement('span');
+    marker.textContent = '|';
+    mirror.appendChild(marker);
+    document.body.appendChild(mirror);
+    const rect = marker.getBoundingClientRect();
+    const mrect = mirror.getBoundingClientRect();
+    const x = rect.left - mrect.left;
+    const y = rect.top  - mrect.top;
+    document.body.removeChild(mirror);
+    return { x, y, lineHeight: parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.4 };
+  }
+
+  function renderAutocomplete() {
+    const popup = document.getElementById('ac-popup');
+    const ta    = document.getElementById('expr-input');
+    if (!popup || !ta) return;
+    if (!acState.open || !acState.items.length) {
+      popup.classList.add('hidden');
+      popup.innerHTML = '';
+      return;
+    }
+    popup.innerHTML = acState.items.map((name, i) => {
+      const hint = acFormatHint(acState.chain, name, acState.kind);
+      return `<button class="ac-item${i===acState.index?' ac-item-sel':''}" data-i="${i}">
+        <span class="ac-name">${esc(name)}</span><span class="ac-hint">${hint}</span>
+      </button>`;
+    }).join('');
+    popup.classList.remove('hidden');
+    // Position near caret. Cap so it doesn't overflow the container.
+    const { x, y, lineHeight } = measureCaret(ta);
+    popup.style.left = Math.max(0, Math.min(x, ta.clientWidth - 200)) + 'px';
+    popup.style.top  = (y + lineHeight + 2 - ta.scrollTop) + 'px';
+  }
+
+  function closeAutocomplete() {
+    acState.open = false;
+    acState.items = [];
+    renderAutocomplete();
+  }
+
+  function updateAutocomplete() {
+    const ta = document.getElementById('expr-input');
+    if (!ta) return;
+    const res = computeAutocomplete(ta.value, ta.selectionEnd);
+    if (!res) { closeAutocomplete(); return; }
+    acState.items        = res.items;
+    acState.index        = 0;
+    acState.replaceStart = res.replaceStart;
+    acState.open         = true;
+    acState.chain        = res.chain;
+    acState.kind         = res.kind;
+    renderAutocomplete();
+  }
+
+  function acceptAutocomplete() {
+    if (!acState.open || !acState.items.length) return false;
+    const ta = document.getElementById('expr-input');
+    if (!ta) return false;
+    const pick = acState.items[acState.index];
+    const before = ta.value.substring(0, acState.replaceStart);
+    const after  = ta.value.substring(ta.selectionEnd);
+
+    // Functions and methods get inserted with parens, cursor between them,
+    // and signature help fired immediately. Attributes insert plain.
+    // Skip appending parens if the user's text already has an open paren
+    // right after (e.g., they typed the `(` themselves).
+    const isFn = acState.kind === 'function' || acState.kind === 'method';
+    const nextChar = after[0] || '';
+    const appendParens = isFn && nextChar !== '(';
+
+    const insertion = appendParens ? pick + '()' : pick;
+    ta.value = before + insertion + after;
+    // Caret goes between the parens for functions, or at end of the pick for attrs.
+    const caretPos = appendParens ? before.length + pick.length + 1 : before.length + pick.length;
+    ta.setSelectionRange(caretPos, caretPos);
+    closeAutocomplete();
+    renderHighlight();
+    scheduleEval();
+    // Trigger signature help so the user sees the params immediately.
+    if (appendParens) setTimeout(renderSignatureHelp, 0);
+    return true;
+  }
+
+  function acKeydown(e) {
+    if (!acState.open) return;
+    if (e.key === 'ArrowDown') {
+      acState.index = (acState.index + 1) % acState.items.length;
+      renderAutocomplete();
+      e.preventDefault();
+    } else if (e.key === 'ArrowUp') {
+      acState.index = (acState.index - 1 + acState.items.length) % acState.items.length;
+      renderAutocomplete();
+      e.preventDefault();
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      if (acceptAutocomplete()) e.preventDefault();
+    } else if (e.key === 'Escape') {
+      closeAutocomplete();
+      e.preventDefault();
+    }
+  }
+
+  // ── Signature help ────────────────────────────────────────────
+  // When the caret is inside a function call's parens, show the function
+  // signature above the caret with the current argument highlighted. Guides
+  // users through OEL functions with multi-arg or optional signatures like
+  // Groups.contains(app, pat[, limit]) or String.stringSwitch(input, default, k1, v1, ...).
+
+  // Parse a signature string like "Groups.contains(app, pat[, limit])" into
+  // { funcName, params: ['app','pat','[limit]'] }. Preserves optional-brackets
+  // in the param label so we can render them dimmer.
+  function parseSignature(sig) {
+    const m = sig.match(/^([^\(]+)\((.*)\)$/);
+    if (!m) return null;
+    const funcName = m[1].trim();
+    const paramStr = m[2].trim();
+    if (!paramStr) return { funcName, params: [] };
+    // Split by top-level commas — accounting for [optional] groups. Okta sigs
+    // use `[, name]` to indicate an optional param, and `...` for varargs.
+    const params = [];
+    let depth = 0, cur = '';
+    for (let i = 0; i < paramStr.length; i++) {
+      const ch = paramStr[i];
+      if (ch === '[') { depth++; cur += ch; }
+      else if (ch === ']') { depth--; cur += ch; }
+      else if (ch === ',' && depth === 0) { params.push(cur.trim()); cur = ''; }
+      else cur += ch;
+    }
+    if (cur.trim()) params.push(cur.trim());
+    // Strip leading `[, ` and trailing `]` on optional params, remember it was optional.
+    return {
+      funcName,
+      params: params.map(p => {
+        const optional = /^\[,?\s*.+\]$/.test(p);
+        const label    = p.replace(/^\[,?\s*/, '').replace(/\]$/, '').trim();
+        return { label, optional };
+      }),
+    };
+  }
+
+  // Build a name → signature entry index once so lookups are cheap.
+  const SIG_INDEX = (() => {
+    const idx = new Map();
+    for (const ns of FUNCTION_REFERENCE) {
+      for (const fn of ns.fns) {
+        const parsed = parseSignature(fn.sig);
+        if (!parsed) continue;
+        // Ignore method-style signatures like `value.toUpperCase()` — those
+        // start with a lowercase pseudo-identifier, not a real function name.
+        if (!/^[A-Z]/.test(parsed.funcName)) continue;
+        idx.set(parsed.funcName, { ...parsed, desc: fn.desc, ex: fn.ex });
+      }
+    }
+    return idx;
+  })();
+
+  // Given the current textarea content + caret position, return the innermost
+  // enclosing function call context, or null. Handles nested calls and skips
+  // over string literals so parens/commas inside strings don't confuse it.
+  function parseCallContext(text, caret) {
+    const stack = [];   // { funcName, argCommas }
+    let i = 0;
+    while (i < caret) {
+      const ch = text[i];
+      if (ch === '"' || ch === "'") {
+        const quote = ch;
+        i++;
+        while (i < caret && text[i] !== quote) {
+          if (text[i] === '\\' && i + 1 < caret) i += 2;
+          else i++;
+        }
+        i++;
+        continue;
+      }
+      if (ch === '(') {
+        // Scan back from `(` to grab the function name (identifier chain).
+        let j = i - 1;
+        while (j >= 0 && /\s/.test(text[j])) j--;
+        const nameEnd = j + 1;
+        while (j >= 0 && /[\w.]/.test(text[j])) j--;
+        const funcName = text.substring(j + 1, nameEnd);
+        stack.push({ funcName, argCommas: 0 });
+      } else if (ch === ')') {
+        stack.pop();
+      } else if (ch === ',' && stack.length) {
+        stack[stack.length - 1].argCommas++;
+      }
+      i++;
+    }
+    if (!stack.length) return null;
+    const top = stack[stack.length - 1];
+    if (!top.funcName) return null;
+    return { funcName: top.funcName, argIndex: top.argCommas };
+  }
+
+  function renderSignatureHelp() {
+    const popup = document.getElementById('sig-popup');
+    const ta    = document.getElementById('expr-input');
+    if (!popup || !ta) return;
+
+    const ctx = parseCallContext(ta.value, ta.selectionEnd);
+    const sig = ctx && SIG_INDEX.get(ctx.funcName);
+    if (!sig) { popup.classList.add('hidden'); popup.innerHTML = ''; return; }
+
+    // Render each param — highlight the one the caret is sitting on. If the
+    // signature accepts varargs (`...`) and we're past the last named param,
+    // highlight the last one as a repeater.
+    const activeIdx = Math.min(ctx.argIndex, sig.params.length - 1);
+    const isVarargs = sig.params.some(p => p.label.endsWith('...'));
+    const paramsHtml = sig.params.map((p, i) => {
+      const active = (i === activeIdx) || (isVarargs && ctx.argIndex >= sig.params.length - 1 && i === sig.params.length - 1);
+      const cls    = 'sig-param' + (active ? ' sig-param-active' : '') + (p.optional ? ' sig-param-opt' : '');
+      const label  = (p.optional ? '[' + p.label + ']' : p.label);
+      return `<span class="${cls}">${esc(label)}</span>`;
+    }).join('<span class="sig-sep">, </span>');
+
+    popup.innerHTML =
+      `<div class="sig-line"><span class="sig-fn">${esc(sig.funcName)}</span>(${paramsHtml})</div>` +
+      `<div class="sig-desc">${esc(sig.desc)}</div>`;
+    popup.classList.remove('hidden');
+
+    // Position above the caret line. If not enough room above, drop below.
+    const { x, y, lineHeight } = measureCaret(ta);
+    popup.style.left = Math.max(0, Math.min(x, ta.clientWidth - 300)) + 'px';
+    const above = y - popup.offsetHeight - 4 - ta.scrollTop;
+    popup.style.top  = (above >= 0 ? above : (y + lineHeight + 2 - ta.scrollTop)) + 'px';
+  }
+
+  function closeSignatureHelp() {
+    const popup = document.getElementById('sig-popup');
+    if (popup) { popup.classList.add('hidden'); popup.innerHTML = ''; }
+  }
+
   // ── Insert helpers ────────────────────────────────────────────
   function insertAt(text) {
     const ta = document.getElementById('expr-input'); if (!ta) return;
     ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end');
-    ta.focus(); scheduleEval();
+    ta.focus(); renderHighlight(); scheduleEval();
   }
 
   // ── Drag & resize ─────────────────────────────────────────────
@@ -1105,6 +2558,34 @@
     // Context selector
     document.getElementById('ctx-select')?.addEventListener('change', e => switchContext(e.target.value));
 
+    // Policy preset (only visible in app_sign_on context)
+    document.getElementById('policy-preset')?.addEventListener('change', e => applyPolicyPreset(e.target.value));
+
+    // Token preview claim-name input — re-renders the preview on every keystroke
+    document.getElementById('token-claim-name')?.addEventListener('input', () => scheduleEval());
+
+    // Token type + auth server selectors
+    document.getElementById('token-type-select')?.addEventListener('change', e => {
+      state.tokenType = e.target.value;
+      sl(LS.TOKEN_TYPE, state.tokenType);
+      scheduleEval();
+    });
+    document.getElementById('auth-server-select')?.addEventListener('change', e => {
+      state.authServerId = e.target.value;
+      sl(LS.AUTH_SERVER, state.authServerId);
+      loadClaimsForCurrentAuthServer();
+      scheduleEval();
+    });
+
+    // Group Rule preview
+    document.getElementById('group-rule-run')?.addEventListener('click', runGroupRulePreview);
+
+    // Output section tabs (Result / Token Preview / Rule Preview)
+    document.getElementById('output-tabs')?.addEventListener('click', e => {
+      const btn = e.target.closest('.output-tab');
+      if (btn && !btn.classList.contains('hidden')) setOutputTab(btn.dataset.otab);
+    });
+
     // User search
     document.getElementById('user-search-btn')?.addEventListener('click', openUserSearch);
     document.getElementById('user-cancel')?.addEventListener('click',     closeUserSearch);
@@ -1115,12 +2596,51 @@
     });
     // user-change is added dynamically in rebuildUserControls
 
+    // App search
+    document.getElementById('app-search-btn')?.addEventListener('click', openAppSearch);
+    document.getElementById('app-cancel')?.addEventListener('click',     closeAppSearch);
+    document.getElementById('app-query')?.addEventListener('input', e => scheduleAppSearch(e.target.value.trim()));
+    document.getElementById('app-results')?.addEventListener('click', e => {
+      const btn = e.target.closest('.user-result');
+      if (btn) { try { selectApp(JSON.parse(btn.dataset.a)); } catch {} }
+    });
+    // app-change is added dynamically in rebuildAppControls
+
     // Expression
     const ta = document.getElementById('expr-input');
     if (ta) {
-      ta.addEventListener('input', scheduleEval);
-      ta.addEventListener('keydown', e => { if (e.key==='Tab') { e.preventDefault(); insertAt('  '); } });
+      const refreshEditorAssist = () => { updateAutocomplete(); renderSignatureHelp(); };
+      ta.addEventListener('input', () => { renderHighlight(); scheduleEval(); refreshEditorAssist(); });
+      ta.addEventListener('scroll', renderHighlight);
+      ta.addEventListener('keydown', e => {
+        // Autocomplete keys take priority over the tab-inserts-space handler.
+        if (acState.open && ['ArrowUp','ArrowDown','Enter','Tab','Escape'].includes(e.key)) {
+          acKeydown(e); return;
+        }
+        if (e.key === 'Tab') { e.preventDefault(); insertAt('  '); }
+      });
+      ta.addEventListener('blur', () => setTimeout(() => { closeAutocomplete(); closeSignatureHelp(); }, 120));
+      ta.addEventListener('click', refreshEditorAssist);
+      ta.addEventListener('keyup', e => {
+        // Recompute after cursor moves via arrow/home/end without changing text,
+        // or when the user types brackets/commas that change call-context.
+        if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(e.key)) {
+          refreshEditorAssist();
+        }
+      });
+      // Initial render for whatever expression was persisted.
+      renderHighlight();
     }
+
+    // Autocomplete popup click-to-insert.
+    document.getElementById('ac-popup')?.addEventListener('mousedown', e => {
+      const btn = e.target.closest('.ac-item');
+      if (btn) {
+        acState.index = parseInt(btn.dataset.i, 10) || 0;
+        acceptAutocomplete();
+        e.preventDefault();   // keep focus on the textarea
+      }
+    });
 
     // Insert
     document.getElementById('fn-select')?.addEventListener('change', e => {
@@ -1142,7 +2662,7 @@
       });
     });
     document.getElementById('btn-clear')?.addEventListener('click', () => {
-      const ta = document.getElementById('expr-input'); if(ta){ta.value='';scheduleEval();}
+      const ta = document.getElementById('expr-input'); if(ta){ta.value=''; renderHighlight(); scheduleEval();}
     });
 
     // Reference: click to use in builder
@@ -1189,7 +2709,7 @@
       const item = e.target.closest('.tpl-item');
       if (item?.dataset.expr) {
         const ta = document.getElementById('expr-input');
-        if (ta) { ta.value = item.dataset.expr; scheduleEval(); }
+        if (ta) { ta.value = item.dataset.expr; renderHighlight(); scheduleEval(); }
         switchTab('builder');
       }
     });
@@ -1232,6 +2752,7 @@
   async function init() {
     inject();
     bindEvents();
+    updateAppPickerVisibility();
 
     // Gate all visibility on a confirmed valid session
     const loggedIn = await checkSession();
@@ -1244,7 +2765,43 @@
     }
     // These are non-blocking and run regardless — they handle their own error states
     fetchOrgInfo();
+    fetchUserSchema().then(s => {
+      if (s) { state.userSchema = s; if (state.visible) refreshChips(); }
+    });
+    fetchAuthServers().then(list => {
+      state.authServers = list;
+      populateAuthServerSelect();
+      // Kick off a claims fetch for the persisted / default selection so the
+      // token preview has data as soon as the user enters oauth_claims context.
+      loadClaimsForCurrentAuthServer();
+    });
     startSessionPolling();
+  }
+
+  function populateAuthServerSelect() {
+    const sel = document.getElementById('auth-server-select');
+    if (!sel) return;
+    sel.innerHTML = state.authServers.map(s => {
+      const label = s.id === 'default' || /org authorization server/i.test(s.name || '')
+        ? `Org: ${s.name}` : `Custom: ${s.name}`;
+      return `<option value="${esc(s.id)}"${s.id === state.authServerId ? ' selected' : ''}>${esc(label)}</option>`;
+    }).join('');
+    // If the persisted authServerId isn't in the fetched list, fall back to the first entry.
+    if (!state.authServers.some(s => s.id === state.authServerId) && state.authServers[0]) {
+      state.authServerId = state.authServers[0].id;
+      sl(LS.AUTH_SERVER, state.authServerId);
+      sel.value = state.authServerId;
+    }
+  }
+
+  async function loadClaimsForCurrentAuthServer() {
+    const id = state.authServerId;
+    if (!id) return;
+    if (state.authServerClaims[id]) return;   // cached
+    const claims = await fetchAuthServerClaims(id);
+    state.authServerClaims[id] = claims;
+    // If the token section is currently visible, re-render with the fresh claims.
+    if (state.ctx === 'oauth_claims' || state.ctx === 'saml') scheduleEval();
   }
 
   init();

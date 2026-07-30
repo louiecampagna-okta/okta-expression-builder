@@ -340,17 +340,13 @@
     contains:        (s,sub) => String(s).includes(String(sub)),
     startsWith:      (s,pre) => String(s).startsWith(String(pre)),
     endsWith:        (s,suf) => String(s).endsWith(String(suf)),
-    substring:       (s,a,b) => b!=null ? String(s).substring(a,b) : String(s).substring(a),
+    substring:       (s,a,b=undefined) => b!=null ? String(s).substring(a,b) : String(s).substring(a),
     substringBefore: (s,d)   => { const i=String(s).indexOf(String(d)); return i<0?String(s):String(s).substring(0,i); },
     substringAfter:  (s,d)   => { const i=String(s).indexOf(String(d)); return i<0?'':String(s).substring(i+String(d).length); },
     replace:         (s,p,r) => String(s).replace(new RegExp(String(p),'g'),r??''),
     replaceFirst:    (s,p,r) => String(s).replace(new RegExp(String(p)),r??''),
     // Identity Engine time parse methods on date strings
     parseStringTime: (s)     => OELDateTime.fromIso(s),
-    parseUnixTime:   (s)     => OELDateTime.fromUnix(s),
-    parseWindowsTime:(s)     => OELDateTime.fromWindows(s),
-    toInteger:       (s)     => { const n=parseInt(s,10); return isNaN(n)?null:n; },
-    toNumber:        (s)     => { const n=parseFloat(s);  return isNaN(n)?null:n; },
   };
 
   // Array method aliases
@@ -362,6 +358,142 @@
     remove:   (a,el) => Array.isArray(a) ? a.filter(e=>e!==el) : [],
     flatten:  (a)    => Array.isArray(a) ? a.flat(Infinity) : [],
   };
+
+  // Types for argument validation. `any` skips the check (rare — most params
+  // have known shapes). `integer` is checked separately from `number` because
+  // many OEL functions specifically want an integer limit/index/count.
+  const AT = { STR:'string', INT:'integer', NUM:'number', BOOL:'boolean', ARR:'array', OBJ:'object', ANY:'any' };
+
+  // Specs for every namespaced OEL function + the top-level ones we ship.
+  // Keyed by full name (e.g. "Groups.startsWith"). The interpreter uses this
+  // to enforce arity AND arg types, and produces error messages that include
+  // the full signature so users understand what's expected.
+  //
+  // Params notation: `n` = name, `t` = type, `optional` = truthy if optional.
+  // Rest params are marked via `rest: true` — any additional args past the
+  // last declared param are accepted (and optionally typed via the last param).
+  const OEL_SPECS = {
+    // ── String namespace ─────────────────────────────────────────────────
+    'String.len':             { sig:'String.len(str)',                          params:[{n:'str',t:AT.STR}] },
+    'String.append':          { sig:'String.append(str, suffix)',               params:[{n:'str',t:AT.STR},{n:'suffix',t:AT.STR}] },
+    'String.join':            { sig:'String.join(sep, str1[, str2, ...])',      params:[{n:'sep',t:AT.STR},{n:'str',t:AT.ANY}], rest:true },
+    'String.toUpperCase':     { sig:'String.toUpperCase(str)',                  params:[{n:'str',t:AT.STR}] },
+    'String.toLowerCase':     { sig:'String.toLowerCase(str)',                  params:[{n:'str',t:AT.STR}] },
+    'String.substring':       { sig:'String.substring(str, start[, end])',      params:[{n:'str',t:AT.STR},{n:'start',t:AT.INT},{n:'end',t:AT.INT,optional:true}] },
+    'String.substringBefore': { sig:'String.substringBefore(str, delimiter)',   params:[{n:'str',t:AT.STR},{n:'delimiter',t:AT.STR}] },
+    'String.substringAfter':  { sig:'String.substringAfter(str, delimiter)',    params:[{n:'str',t:AT.STR},{n:'delimiter',t:AT.STR}] },
+    'String.replace':         { sig:'String.replace(str, pattern, replacement)',params:[{n:'str',t:AT.STR},{n:'pattern',t:AT.STR},{n:'replacement',t:AT.STR}] },
+    'String.replaceFirst':    { sig:'String.replaceFirst(str, pattern, replacement)',params:[{n:'str',t:AT.STR},{n:'pattern',t:AT.STR},{n:'replacement',t:AT.STR}] },
+    'String.stringContains':  { sig:'String.stringContains(str, substring)',    params:[{n:'str',t:AT.STR},{n:'substring',t:AT.STR}] },
+    'String.startsWith':      { sig:'String.startsWith(str, prefix)',           params:[{n:'str',t:AT.STR},{n:'prefix',t:AT.STR}] },
+    'String.removeSpaces':    { sig:'String.removeSpaces(str)',                 params:[{n:'str',t:AT.STR}] },
+    'String.trim':            { sig:'String.trim(str)',                         params:[{n:'str',t:AT.STR}] },
+    'String.stringSwitch':    { sig:'String.stringSwitch(input, default, k1, v1[, k2, v2, ...])',
+                                params:[{n:'input',t:AT.ANY},{n:'default',t:AT.ANY},{n:'key',t:AT.ANY},{n:'value',t:AT.ANY}], rest:true },
+    'String.toString':        { sig:'String.toString(value)',                   params:[{n:'value',t:AT.ANY}] },
+
+    // ── Arrays namespace ─────────────────────────────────────────────────
+    'Arrays.contains':     { sig:'Arrays.contains(array, element)',   params:[{n:'array',t:AT.ARR},{n:'element',t:AT.ANY}] },
+    'Arrays.size':         { sig:'Arrays.size(array)',                params:[{n:'array',t:AT.ARR}] },
+    'Arrays.isEmpty':      { sig:'Arrays.isEmpty(array)',             params:[{n:'array',t:AT.ARR}] },
+    'Arrays.add':          { sig:'Arrays.add(array, element)',        params:[{n:'array',t:AT.ARR},{n:'element',t:AT.ANY}] },
+    'Arrays.remove':       { sig:'Arrays.remove(array, element)',     params:[{n:'array',t:AT.ARR},{n:'element',t:AT.ANY}] },
+    'Arrays.get':          { sig:'Arrays.get(array, index)',          params:[{n:'array',t:AT.ARR},{n:'index',t:AT.INT}] },
+    'Arrays.toCsvString':  { sig:'Arrays.toCsvString(array)',         params:[{n:'array',t:AT.ARR}] },
+    'Arrays.flatten':      { sig:'Arrays.flatten(...values)',         params:[{n:'value',t:AT.ANY}], rest:true },
+
+    // ── Time namespace ───────────────────────────────────────────────────
+    'Time.now':                  { sig:'Time.now([tz[, format]])',                    params:[{n:'tz',t:AT.STR,optional:true},{n:'format',t:AT.STR,optional:true}] },
+    'Time.fromUnixToIso8601':    { sig:'Time.fromUnixToIso8601(unix)',                params:[{n:'unix',t:AT.INT}] },
+    'Time.fromIso8601ToUnix':    { sig:'Time.fromIso8601ToUnix(iso)',                 params:[{n:'iso',t:AT.STR}] },
+    'Time.fromWindowsToIso8601': { sig:'Time.fromWindowsToIso8601(filetime)',         params:[{n:'filetime',t:AT.ANY}] },
+    'Time.fromIso8601ToWindows': { sig:'Time.fromIso8601ToWindows(iso)',              params:[{n:'iso',t:AT.STR}] },
+    'Time.fromStringToIso8601':  { sig:'Time.fromStringToIso8601(string)',            params:[{n:'string',t:AT.STR}] },
+    'Time.fromIso8601ToString':  { sig:'Time.fromIso8601ToString(iso, format)',       params:[{n:'iso',t:AT.STR},{n:'format',t:AT.STR}] },
+
+    // ── Convert namespace ────────────────────────────────────────────────
+    'Convert.toInt':    { sig:'Convert.toInt(value)',    params:[{n:'value',t:AT.ANY}] },
+    'Convert.toNum':    { sig:'Convert.toNum(value)',    params:[{n:'value',t:AT.ANY}] },
+    'Convert.toString': { sig:'Convert.toString(value)', params:[{n:'value',t:AT.ANY}] },
+
+    // ── Iso3166Convert namespace ─────────────────────────────────────────
+    'Iso3166Convert.toAlpha2':  { sig:'Iso3166Convert.toAlpha2(value)',  params:[{n:'value',t:AT.STR}] },
+    'Iso3166Convert.toAlpha3':  { sig:'Iso3166Convert.toAlpha3(value)',  params:[{n:'value',t:AT.STR}] },
+    'Iso3166Convert.toNumeric': { sig:'Iso3166Convert.toNumeric(value)', params:[{n:'value',t:AT.STR}] },
+    'Iso3166Convert.toName':    { sig:'Iso3166Convert.toName(value)',    params:[{n:'value',t:AT.STR}] },
+
+    // ── Groups namespace ─────────────────────────────────────────────────
+    'Groups.contains':   { sig:'Groups.contains(app, pattern, limit)',   params:[{n:'app',t:AT.ANY},{n:'pattern',t:AT.STR},{n:'limit',t:AT.INT}] },
+    'Groups.startsWith': { sig:'Groups.startsWith(app, pattern, limit)', params:[{n:'app',t:AT.ANY},{n:'pattern',t:AT.STR},{n:'limit',t:AT.INT}] },
+    'Groups.endsWith':   { sig:'Groups.endsWith(app, pattern, limit)',   params:[{n:'app',t:AT.ANY},{n:'pattern',t:AT.STR},{n:'limit',t:AT.INT}] },
+
+    // ── DateTime namespace ───────────────────────────────────────────────
+    'DateTime.now': { sig:'DateTime.now()', params:[] },
+
+    // ── Top-level (Call) functions ───────────────────────────────────────
+    'isMemberOfGroupName':           { sig:'isMemberOfGroupName(name)',           params:[{n:'name',t:AT.STR}] },
+    'isMemberOfGroup':               { sig:'isMemberOfGroup(groupId)',            params:[{n:'groupId',t:AT.STR}] },
+    'isMemberOfAnyGroup':            { sig:'isMemberOfAnyGroup(name1[, name2, ...])', params:[{n:'name',t:AT.STR}], rest:true },
+    'isMemberOfGroupNameStartsWith': { sig:'isMemberOfGroupNameStartsWith(prefix)',params:[{n:'prefix',t:AT.STR}] },
+    'isMemberOfGroupNameContains':   { sig:'isMemberOfGroupNameContains(substring)',params:[{n:'substring',t:AT.STR}] },
+    'isMemberOfGroupNameRegex':      { sig:'isMemberOfGroupNameRegex(regex)',     params:[{n:'regex',t:AT.STR}] },
+    'getFilteredGroups':             { sig:'getFilteredGroups(whitelist[, format[, limit]])',
+                                       params:[{n:'whitelist',t:AT.ARR},{n:'format',t:AT.STR,optional:true},{n:'limit',t:AT.INT,optional:true}] },
+    'getManagerUser':                { sig:'getManagerUser(source)',              params:[{n:'source',t:AT.ANY}] },
+    'getManagerAppUser':             { sig:'getManagerAppUser(source, attribute)',params:[{n:'source',t:AT.ANY},{n:'attribute',t:AT.STR}] },
+    'getAssistantUser':              { sig:'getAssistantUser(source)',            params:[{n:'source',t:AT.ANY}] },
+    'getAssistantAppUser':           { sig:'getAssistantAppUser(source, attribute)',params:[{n:'source',t:AT.ANY},{n:'attribute',t:AT.STR}] },
+    'hasDirectoryUser':              { sig:'hasDirectoryUser()',                  params:[] },
+    'findDirectoryUser':             { sig:'findDirectoryUser()',                 params:[] },
+    'hasWorkdayUser':                { sig:'hasWorkdayUser()',                    params:[] },
+    'findWorkdayUser':               { sig:'findWorkdayUser()',                   params:[] },
+  };
+
+  // Type predicate. Nulls are always allowed (Okta's runtime treats null as a
+  // valid value that expressions must handle themselves).
+  function argMatchesType(v, t) {
+    if (v === null || v === undefined) return true;
+    if (t === AT.ANY)     return true;
+    if (t === AT.STR)     return typeof v === 'string';
+    if (t === AT.INT)     return typeof v === 'number' && Number.isInteger(v);
+    if (t === AT.NUM)     return typeof v === 'number' && !Number.isNaN(v);
+    if (t === AT.BOOL)    return typeof v === 'boolean';
+    if (t === AT.ARR)     return Array.isArray(v);
+    if (t === AT.OBJ)     return typeof v === 'object' && v !== null && !Array.isArray(v);
+    return true;
+  }
+  function describeActualType(v) {
+    if (v === null)              return 'null';
+    if (v === undefined)         return 'undefined';
+    if (Array.isArray(v))        return 'array';
+    if (typeof v === 'number')   return Number.isInteger(v) ? 'integer' : 'number';
+    return typeof v;
+  }
+
+  // Reject calls whose arg count or arg types don't match the OEL spec.
+  // Falls back to the JS function's own .length for functions not in the
+  // spec table (rare — mostly user-object methods like user.isMemberOf).
+  function checkCall(fullName, fn, args) {
+    const spec = OEL_SPECS[fullName];
+    if (!spec) {
+      const required = fn.length;
+      if (args.length < required) {
+        throw new Error(`'${fullName}' expected ${required} argument${required===1?'':'s'} but got ${args.length}`);
+      }
+      return;
+    }
+    const required = spec.params.filter(p => !p.optional).length;
+    if (args.length < required) {
+      throw new Error(`${spec.sig} — expected at least ${required} argument${required===1?'':'s'} but got ${args.length}`);
+    }
+    for (let i = 0; i < args.length; i++) {
+      const p = spec.rest && i >= spec.params.length ? spec.params[spec.params.length - 1] : spec.params[i];
+      if (!p) break;
+      if (!argMatchesType(args[i], p.t)) {
+        throw new Error(`${spec.sig} — argument ${i+1} ('${p.n}') must be ${p.t}, got ${describeActualType(args[i])}`);
+      }
+    }
+  }
 
   class Interpreter {
     constructor(ctx) { this.ctx = ctx; }
@@ -397,17 +529,33 @@
 
           if (obj == null) return null;
 
-          // Direct method on object (plain JS or OELDateTime)
-          if (typeof obj[node.method] === 'function') return obj[node.method](...args);
-
-          // Identity Engine: method chaining on primitive strings
-          if (typeof obj === 'string' && STRING_METHOD_ALIASES[node.method]) {
-            return STRING_METHOD_ALIASES[node.method](obj, ...args);
+          // Direct method on object (namespace member, plain JS, OELDateTime).
+          // If the object is a top-level namespace Ident (Groups/String/etc.),
+          // we can derive the fully-qualified name for spec-based validation.
+          if (typeof obj[node.method] === 'function') {
+            const nsName  = node.object.type === 'Ident' ? node.object.name : null;
+            const fullName = nsName ? `${nsName}.${node.method}` : node.method;
+            checkCall(fullName, obj[node.method], args);
+            return obj[node.method](...args);
           }
 
-          // Identity Engine: method chaining on arrays
+          // Identity Engine: method chaining on primitive strings/arrays.
+          // The JS function takes (obj, ...userArgs); user-visible arity is
+          // fn.length - 1. Type check falls back to JS-length only (specs are
+          // namespace-keyed and don't apply to method chains).
+          if (typeof obj === 'string' && STRING_METHOD_ALIASES[node.method]) {
+            const fn = STRING_METHOD_ALIASES[node.method];
+            if (args.length + 1 < fn.length) {
+              throw new Error(`'.${node.method}(...)' on string expected ${fn.length - 1} argument${(fn.length-1)===1?'':'s'} but got ${args.length}`);
+            }
+            return fn(obj, ...args);
+          }
           if (Array.isArray(obj) && ARRAY_METHOD_ALIASES[node.method]) {
-            return ARRAY_METHOD_ALIASES[node.method](obj, ...args);
+            const fn = ARRAY_METHOD_ALIASES[node.method];
+            if (args.length + 1 < fn.length) {
+              throw new Error(`'.${node.method}(...)' on array expected ${fn.length - 1} argument${(fn.length-1)===1?'':'s'} but got ${args.length}`);
+            }
+            return fn(obj, ...args);
           }
 
           // OEL namespace method calls already handled via 'Member' lookup
@@ -418,6 +566,7 @@
           const fn = this.ctx[node.name];
           if (typeof fn !== 'function') throw new Error(`'${node.name}' is not a function`);
           const args = node.args.map(a => this.eval(a));
+          checkCall(node.name, fn, args);
           return fn(...args);
         }
 
@@ -500,7 +649,7 @@
 
     // User object — augmented with OEL built-in methods
     const user = Object.assign(Object.create(null), rawUser, {
-      getGroups(prefix, conditions, limit) {
+      getGroups(prefix = undefined, conditions = undefined, limit = undefined) {
         let r = prefix ? groups.filter(g => g.startsWith(String(prefix))) : [...groups];
         if (typeof limit==='number') r = r.slice(0, limit);
         return r;
@@ -527,8 +676,11 @@
       getLinkedObject(primaryName) { return null; }, // mock
     });
 
-    // appuser — app-specific profile, falls back to user
-    const appuser = Object.assign(Object.create(null), rawUser, profile.appuser || {});
+    // appuser — app-specific profile. Contains ONLY what the selected app's
+    // assignment actually has; there is no fallback to the user object. When
+    // a user isn't assigned to an app, every appuser.* reference must resolve
+    // to null — that matches Okta's real runtime behavior.
+    const appuser = Object.assign(Object.create(null), profile.appuser || {});
 
     // ── String namespace ──────────────────────────────────────────
     const OELString = {
@@ -537,7 +689,7 @@
       join:            (sep,...pts) => { const a=Array.isArray(pts[0])?pts[0]:pts; return a.map(p=>p??'').join(sep??''); },
       toUpperCase:     (s)          => s==null?null:String(s).toUpperCase(),
       toLowerCase:     (s)          => s==null?null:String(s).toLowerCase(),
-      substring:       (s,a,b)      => s==null?null:(b!=null?String(s).substring(a,b):String(s).substring(a)),
+      substring:       (s,a,b=undefined) => s==null?null:(b!=null?String(s).substring(a,b):String(s).substring(a)),
       substringBefore: (s,d)        => { if(s==null)return null; const i=String(s).indexOf(String(d)); return i<0?String(s):String(s).substring(0,i); },
       substringAfter:  (s,d)        => { if(s==null)return null; const i=String(s).indexOf(String(d)); return i<0?'':String(s).substring(i+String(d).length); },
       replace:         (s,p,r)      => s==null?null:String(s).replace(new RegExp(String(p),'g'),r??''),
@@ -546,8 +698,6 @@
       startsWith:      (s,pre)      => s!=null && String(s).startsWith(String(pre)),
       removeSpaces:    (s)          => s==null?null:String(s).replace(/\s+/g,''),
       trim:            (s)          => s==null?null:String(s).trim(),
-      match:           (s,re)       => s!=null && new RegExp(String(re)).test(String(s)),
-      splitByRegex:    (s,re)       => s==null?[]:String(s).split(new RegExp(String(re))),
       toString:        (v)          => v==null?null:String(v),
       stringSwitch(input, def, ...pairs) {
         const str = String(input ?? '');
@@ -562,21 +712,17 @@
     const OELArrays = {
       add:          (a,el)   => Array.isArray(a)?[...a,el]:[el],
       remove:       (a,el)   => Array.isArray(a)?a.filter(e=>e!==el):[],
-      clear:        ()       => [],
       get:          (a,i)    => Array.isArray(a)?(a[i]??null):null,
       contains:     (a,el)   => Array.isArray(a)&&a.includes(el),
       size:         (a)      => a==null?0:(Array.isArray(a)?a.length:String(a).length),
       isEmpty:      (a)      => a==null||(Array.isArray(a)&&a.length===0),
       toCsvString:  (a)      => Array.isArray(a)?a.join(','):'',
       flatten:      (...as)  => as.flat(Infinity),
-      unique:       (a)      => Array.isArray(a)?[...new Set(a)]:[],
-      intersection: (a,b)    => (Array.isArray(a)&&Array.isArray(b))?a.filter(e=>b.includes(e)):[],
-      union:        (a,b)    => [...new Set([...(Array.isArray(a)?a:[]),...(Array.isArray(b)?b:[])])],
     };
 
     // ── Time namespace ────────────────────────────────────────────
     const OELTime = {
-      now(tz, fmt) {
+      now(tz = undefined, fmt = undefined) {
         const dt = new OELDateTime(new Date());
         return fmt ? formatDate(dt._d, fmt) : dt._d.toISOString();
       },
@@ -593,7 +739,6 @@
       toInt:    (v) => { if(v==null)return null; const n=parseInt(String(v),10); return isNaN(n)?null:n; },
       toNum:    (v) => { if(v==null)return null; const n=parseFloat(String(v));   return isNaN(n)?null:n; },
       toString: (v) => v==null?null:String(v),
-      toBool:   (v) => v==null?null:(typeof v==='boolean'?v:String(v).toLowerCase()==='true'),
     };
 
     // ── Iso3166Convert namespace ──────────────────────────────────
@@ -628,25 +773,30 @@
     const isMemberOfGroupNameStartsWith = (pre) => groups.some(g => g.startsWith(String(pre)));
     const isMemberOfGroupNameContains   = (sub) => groups.some(g => g.includes(String(sub)));
     const isMemberOfGroupNameRegex      = (re)  => groups.some(g => new RegExp(String(re)).test(g));
-    const getFilteredGroups             = (wl, _cond, limit) => {
+    const getFilteredGroups             = (wl, _cond = undefined, limit = undefined) => {
       let r = Array.isArray(wl) ? groups.filter(g => wl.includes(g)) : [...groups];
       return typeof limit==='number' ? r.slice(0, limit) : r;
     };
 
-    // Legacy Groups.* API
+    // Legacy Groups.* API. All three params required per Okta docs — no JS
+    // defaults so Function.length correctly reports 3 (matches the spec).
     const Groups = {
-      contains:   (_app, pat, limit=10) => { let r=groups.filter(g=>g.includes(String(pat))); return r.slice(0,limit); },
-      startsWith: (_app, pat, limit=10) => { let r=groups.filter(g=>g.startsWith(String(pat))); return r.slice(0,limit); },
-      endsWith:   (_app, pat, limit=10) => { let r=groups.filter(g=>g.endsWith(String(pat)));   return r.slice(0,limit); },
+      contains:   (_app, pat, limit) => { let r=groups.filter(g=>g.includes(String(pat)));   return r.slice(0, limit); },
+      startsWith: (_app, pat, limit) => { let r=groups.filter(g=>g.startsWith(String(pat))); return r.slice(0, limit); },
+      endsWith:   (_app, pat, limit) => { let r=groups.filter(g=>g.endsWith(String(pat)));   return r.slice(0, limit); },
     };
 
     // ── Manager / Assistant functions ─────────────────────────────
-    const managerProfile = rawUser.managerId ? {
-      login:     rawUser.managerEmail || null,
-      email:     rawUser.managerEmail || null,
-      firstName: rawUser.manager ? rawUser.manager.split(' ')[0] : null,
-      lastName:  rawUser.manager ? rawUser.manager.split(' ').slice(1).join(' ') : null,
-    } : null;
+    // If the content script has fetched the manager's real profile, prefer it.
+    // Otherwise derive a minimal profile from the string fields on the user.
+    const managerProfile = profile.manager
+      ? profile.manager
+      : rawUser.managerId ? {
+          login:     rawUser.managerEmail || null,
+          email:     rawUser.managerEmail || null,
+          firstName: rawUser.manager ? rawUser.manager.split(' ')[0] : null,
+          lastName:  rawUser.manager ? rawUser.manager.split(' ').slice(1).join(' ') : null,
+        } : null;
 
     const getManagerUser      = (_src)         => managerProfile;
     const getManagerAppUser   = (_src, _attr)  => managerProfile;
@@ -668,8 +818,31 @@
       Object.entries(profile.apps).forEach(([k, v]) => { namedApps[k] = v; });
     }
 
+    // ── OAuth-time variables ──────────────────────────────────────
+    // Okta claim expressions on authorization servers can reference the OAuth
+    // client, request parameters, and general request context. Mocked from the
+    // selected app + scopes so tenant claims using these variables evaluate
+    // instead of throwing.
+    const client = {
+      id:   app.clientId || null,
+      name: app.profile?.label || app.label || null,
+    };
+    const oauth_request = {
+      client_id: app.clientId || null,
+      scope:     Array.isArray(access.scope) ? access.scope.join(' ') : (access.scope || ''),
+      scopes:    Array.isArray(access.scope) ? access.scope : [],
+    };
+    const context = {
+      device, session, security,
+      // Newer Okta docs also expose `context.oauth2.*` — mirror the request there.
+      oauth2: { client, request: oauth_request },
+      // Legacy alias for org
+      org,
+    };
+
     return {
       user, appuser, idpuser, app, access, org, groups, groupIds, session, security, device,
+      client, oauth_request, context,
       String:  OELString,
       Arrays:  OELArrays,
       Time:    OELTime,

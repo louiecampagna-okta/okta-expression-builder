@@ -46,7 +46,7 @@
 
   --ody-shadow: 0 2px 8px rgba(0,0,0,0.12), 0 6px 20px rgba(0,0,0,0.10);
   --ody-font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --ody-mono: "Roboto Mono", "Fira Code", "Consolas", "Monaco", monospace;
+  --ody-mono: ui-monospace, "SF Mono", "Menlo", "Cascadia Code", "Consolas", "Roboto Mono", "Fira Code", "DejaVu Sans Mono", monospace;
 }
 
 /* Scoped box-sizing + font reset — does NOT touch Okta elements */
@@ -156,11 +156,11 @@
 #oeb-root #pane-builder { overflow: hidden; padding: 0 12px 12px; background: var(--ody-n0); }
 
 #oeb-root .controls-strip {
-  padding: 12px 16px;
+  padding: 8px 16px;
   background: var(--ody-n50); border: 1px solid var(--ody-border);
   border-top: none; border-radius: 0 0 var(--ody-r-md) var(--ody-r-md);
-  display: flex; flex-direction: column; gap: 10px;
-  flex-shrink: 0; margin-bottom: 12px;
+  display: flex; flex-direction: column; gap: 6px;
+  flex-shrink: 0; margin-bottom: 8px;
 }
 #oeb-root .ctrl-row   { display: flex; align-items: center; gap: 10px; }
 #oeb-root .ctrl-label {
@@ -171,16 +171,17 @@
 #oeb-root .ctrl-select {
   flex: 1; background: var(--ody-n0); color: var(--ody-n900);
   border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
-  padding: 7px 10px; font-family: var(--ody-font); font-size: 13px;
+  padding: 5px 10px; font-family: var(--ody-font); font-size: 13px;
   outline: none; cursor: pointer; transition: border-color 0.1s;
 }
 #oeb-root .ctrl-select:focus { border-color: var(--ody-primary); outline: 2px solid var(--ody-primary-ring); outline-offset: 1px; }
 
-#oeb-root .user-ctrl { flex: 1; min-width: 0; }
+#oeb-root .user-ctrl,
+#oeb-root .app-ctrl  { flex: 1; min-width: 0; }
 
 #oeb-root .user-empty-btn {
   display: flex; align-items: center; gap: 8px;
-  width: 100%; padding: 8px 12px;
+  width: 100%; padding: 5px 12px;
   background: var(--ody-n0); color: var(--ody-n600);
   border: 1px dashed var(--ody-border-c); border-radius: var(--ody-r);
   font-family: var(--ody-font); font-size: 13px; font-weight: 500;
@@ -191,7 +192,7 @@
 
 #oeb-root .user-selected {
   display: flex; align-items: center; gap: 10px;
-  padding: 7px 12px;
+  padding: 4px 10px;
   background: var(--ody-primary-lt); border: 1px solid var(--ody-primary-ring); border-radius: var(--ody-r);
 }
 #oeb-root .user-info  { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
@@ -199,12 +200,23 @@
 #oeb-root .user-email { font-size: 11px; color: var(--ody-n600); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 #oeb-root .avatar {
-  width: 28px; height: 28px; border-radius: 50%;
+  width: 24px; height: 24px; border-radius: 50%;
   background: var(--ody-primary); color: var(--ody-n0);
   display: flex; align-items: center; justify-content: center;
-  font-size: 11px; font-weight: 600; flex-shrink: 0;
+  font-size: 10px; font-weight: 600; flex-shrink: 0;
 }
 #oeb-root .ava-sm { width: 24px; height: 24px; font-size: 10px; }
+
+/* App picker: reuses user-picker markup but with a distinct accent color. */
+#oeb-root .app-avatar { background: var(--ody-warning, #bc6b00); }
+#oeb-root .app-assign {
+  display: inline-block; margin-left: 5px; padding: 1px 6px; border-radius: 100px;
+  font-size: 10px; font-weight: 600;
+}
+#oeb-root .app-assign-ok   { background: var(--ody-success-lt); color: var(--ody-success); }
+#oeb-root .app-assign-warn { background: var(--ody-danger-lt);  color: var(--ody-danger); }
+#oeb-root .app-dir-pill    { background: var(--ody-warning-lt); color: var(--ody-warning); margin-left: 6px; }
+#oeb-root .app-filter-hint { padding: 6px 12px; font-size: 11px; color: var(--ody-n600); background: var(--ody-n50); border-bottom: 1px solid var(--ody-border); }
 
 #oeb-root .user-search-panel {
   margin-top: 4px;
@@ -253,11 +265,29 @@
 #oeb-root .section { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; flex-shrink: 0; }
 #oeb-root .section + .section { border-top: 1px solid var(--ody-border); }
 
-#oeb-root .result-section {
+/* Combined output section: tabs + one visible pane at a time. */
+#oeb-root .output-section {
   flex-shrink: 0; background: var(--ody-n50);
   border-top: 1px solid var(--ody-border);
-  padding: 12px 16px; display: flex; flex-direction: column; gap: 10px;
+  padding: 8px 16px 12px; display: flex; flex-direction: column; gap: 8px;
 }
+#oeb-root .output-tabs {
+  display: flex; align-items: center; gap: 4px; flex-shrink: 0;
+  border-bottom: 1px solid var(--ody-border); margin-bottom: 4px;
+}
+#oeb-root .output-tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px 7px; background: transparent; border: none;
+  border-bottom: 2px solid transparent;
+  font-family: var(--ody-font); font-size: 12px; font-weight: 500;
+  color: var(--ody-n600); cursor: pointer;
+  transition: color 0.1s, border-color 0.1s;
+}
+#oeb-root .output-tab:hover      { color: var(--ody-n800); }
+#oeb-root .output-tab-on         { color: var(--ody-primary); font-weight: 600; border-bottom-color: var(--ody-primary); }
+#oeb-root .output-pane           { display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; }
+#oeb-root .output-pane-hd        { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
+#oeb-root .token-title           { font-size: 11px; font-weight: 600; color: var(--ody-n700); text-transform: uppercase; letter-spacing: 0.07em; }
 #oeb-root .insert-section {
   flex: 1; min-height: 0; overflow: hidden; background: var(--ody-n50);
   border-top: 1px solid var(--ody-border);
@@ -297,15 +327,52 @@
 
 /* ── Textarea / inputs ────────────────────────────────────── */
 
+/* Base editor typography — shared by textarea + highlighted <pre> so tokens align pixel-perfect. */
 #oeb-root .expr-ta {
   width: 100%; background: var(--ody-n0); color: var(--ody-n900);
   border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
   padding: 8px 11px; font-family: var(--ody-mono); font-size: 12px; line-height: 1.55;
   resize: none; outline: none; height: 72px;
+  box-sizing: border-box;
+  white-space: pre-wrap; word-wrap: break-word;
+  margin: 0;
   transition: border-color 0.1s;
 }
 #oeb-root .expr-ta:focus        { border-color: var(--ody-primary); outline: 2px solid var(--ody-primary-ring); outline-offset: 1px; }
 #oeb-root .expr-ta::placeholder { color: var(--ody-n400); }
+
+/* Syntax-highlighted overlay sits behind the transparent textarea. */
+#oeb-root .expr-highlight {
+  position: absolute; inset: 0;
+  pointer-events: none; overflow: hidden;
+  color: var(--ody-n900);
+  border-color: transparent;   /* border comes from the textarea to avoid double-drawing */
+  background: var(--ody-n0);
+  font-family: var(--ody-mono);
+  font-variant-ligatures: none;   /* disable ligatures so glyphs match the textarea 1:1 */
+  tab-size: 2;
+}
+/* Token spans inherit font-family/size from the .expr-highlight parent — never
+   introduce weight/style changes here that would alter glyph advance widths. */
+#oeb-root .expr-highlight span { font-family: inherit; font-size: inherit; }
+#oeb-root .expr-input-overlay {
+  position: relative;
+  background: transparent;
+  color: transparent;           /* text is provided by the highlighter; keep caret visible */
+  caret-color: var(--ody-n900);
+}
+#oeb-root .expr-input-overlay::selection { background: rgba(84,107,231,0.28); color: transparent; }
+
+/* Token colors — no weight/style shifts, so every glyph keeps the same width. */
+#oeb-root .expr-highlight .hl-str   { color: var(--ody-success); }
+#oeb-root .expr-highlight .hl-num   { color: var(--ody-warning); }
+#oeb-root .expr-highlight .hl-kw    { color: #6200cc; }
+#oeb-root .expr-highlight .hl-ns    { color: var(--ody-primary); }
+#oeb-root .expr-highlight .hl-root  { color: #1662dd; }
+#oeb-root .expr-highlight .hl-fn    { color: #00853b; }
+#oeb-root .expr-highlight .hl-ident { color: var(--ody-n900); }
+#oeb-root .expr-highlight .hl-op    { color: var(--ody-n600); }
+#oeb-root .expr-highlight .hl-paren { color: var(--ody-n500); }
 
 #oeb-root .result-box {
   height: 72px; min-height: 72px; overflow-y: auto;
@@ -370,6 +437,107 @@
 }
 #oeb-root .attr-row:hover      { background: var(--ody-primary-lt); }
 #oeb-root .attr-row:last-child { border-bottom: none; }
+#oeb-root .attr-row-null .attr-key { color: var(--ody-n600); }
+#oeb-root .attr-row-null .attr-val { color: var(--ody-n400); font-style: italic; }
+
+/* Token / assertion preview elements — live inside the tabbed output pane */
+#oeb-root .token-name-input {
+  background: var(--ody-n0); border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
+  padding: 3px 8px; font-family: var(--ody-mono); font-size: 11px; color: var(--ody-n900);
+  outline: none; width: 130px;
+}
+#oeb-root .token-name-input:focus { border-color: var(--ody-primary); }
+#oeb-root .token-select {
+  background: var(--ody-n0); border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
+  padding: 3px 6px; font-size: 11px; color: var(--ody-n900);
+  outline: none; cursor: pointer; max-width: 180px;
+}
+#oeb-root .token-select:focus { border-color: var(--ody-primary); }
+#oeb-root .token-preview {
+  margin: 0; padding: 10px 12px;
+  background: var(--ody-n0); border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
+  font-family: var(--ody-mono); font-size: 11px; line-height: 1.5; color: var(--ody-n900);
+  white-space: pre-wrap; word-break: break-all;
+}
+#oeb-root .token-eval-errors {
+  margin-top: 6px; padding: 8px 10px;
+  background: var(--ody-warning-lt); border: 1px solid var(--ody-warning-bd); border-radius: var(--ody-r);
+  font-size: 11px; color: var(--ody-n800);
+}
+#oeb-root .token-err-hd    { font-weight: 600; margin-bottom: 4px; color: var(--ody-warning); }
+#oeb-root .token-info-hd   { font-weight: 600; margin-bottom: 4px; color: var(--ody-n700); }
+#oeb-root .token-err-sep   { height: 1px; background: var(--ody-warning-bd); margin: 6px 0; }
+#oeb-root .token-err-row   { display: grid; grid-template-columns: minmax(90px, auto) 1fr; column-gap: 8px; padding: 2px 0; border-top: 1px solid var(--ody-warning-bd); }
+#oeb-root .token-err-row:first-of-type { border-top: none; }
+#oeb-root .token-err-name  { font-weight: 600; color: var(--ody-n900); padding-top: 2px; }
+#oeb-root .token-err-expr  { color: var(--ody-n700); word-break: break-all; }
+#oeb-root .token-err-msg   { grid-column: 2 / 3; color: var(--ody-danger); font-style: italic; }
+#oeb-root .token-info-hd + .token-err-row .token-err-msg,
+#oeb-root .token-info-hd ~ .token-err-row .token-err-msg { color: var(--ody-n600); }
+
+/* Group Rule preview elements — live inside the tabbed output pane */
+#oeb-root .group-rule-summary { display: flex; gap: 8px; flex-wrap: wrap; padding: 4px 0; font-size: 11px; }
+#oeb-root .gr-stat            { padding: 2px 8px; border-radius: 100px; font-weight: 600; }
+#oeb-root .gr-pass            { background: var(--ody-success-lt); color: var(--ody-success); }
+#oeb-root .gr-fail            { background: var(--ody-n100);       color: var(--ody-n600); }
+#oeb-root .gr-err             { background: var(--ody-danger-lt);  color: var(--ody-danger); }
+#oeb-root .gr-note            { color: var(--ody-n500); align-self: center; }
+#oeb-root .group-rule-results { border: 1px solid var(--ody-border); border-radius: var(--ody-r); background: var(--ody-n0); }
+#oeb-root .gr-user            { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--ody-border); }
+#oeb-root .gr-user:last-child { border-bottom: none; }
+
+/* Autocomplete popup for the expression editor */
+#oeb-root .expr-wrap  { position: relative; height: 72px; }
+#oeb-root .ac-popup {
+  position: absolute; z-index: 10;
+  min-width: 280px; max-width: 460px; max-height: 220px; overflow-y: auto;
+  background: var(--ody-n0); border: 1px solid var(--ody-border-c); border-radius: var(--ody-r);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+  display: flex; flex-direction: column;
+}
+#oeb-root .ac-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 10px; background: transparent; border: none;
+  border-bottom: 1px solid var(--ody-border);
+  font-family: var(--ody-mono); font-size: 12px; text-align: left; color: var(--ody-n900);
+  cursor: pointer; width: 100%;
+}
+#oeb-root .ac-item:hover, #oeb-root .ac-item-sel { background: var(--ody-primary-lt); color: var(--ody-primary); }
+#oeb-root .ac-item:last-child { border-bottom: none; }
+#oeb-root .ac-name { flex-shrink: 0; }
+#oeb-root .ac-hint {
+  margin-left: auto; text-align: right;
+  font-size: 11px; color: var(--ody-n500);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 180px;
+}
+#oeb-root .ac-hint-str  { color: var(--ody-success); }
+#oeb-root .ac-hint-num  { color: var(--ody-warning); }
+#oeb-root .ac-hint-bool { color: var(--ody-warning); font-weight: 600; }
+#oeb-root .ac-hint-arr  { color: var(--ody-primary); }
+#oeb-root .ac-hint-obj  { color: var(--ody-n600); }
+#oeb-root .ac-hint-null { color: var(--ody-n400); font-style: italic; }
+#oeb-root .ac-hint-sig  { color: var(--ody-n600); font-style: italic; }
+#oeb-root .ac-item-sel .ac-hint,
+#oeb-root .ac-item-sel .ac-hint > *  { color: inherit; }
+
+/* Signature help popup — shows above the caret when inside a function call */
+#oeb-root .sig-popup {
+  position: absolute; z-index: 11;
+  min-width: 200px; max-width: 420px;
+  padding: 7px 10px;
+  background: var(--ody-n900); color: var(--ody-n0);
+  border-radius: var(--ody-r);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.28);
+  pointer-events: none;   /* don't block clicks on the textarea below */
+}
+#oeb-root .sig-line          { font-family: var(--ody-mono); font-size: 12px; margin-bottom: 4px; line-height: 1.4; }
+#oeb-root .sig-fn            { color: #b3c3f8; font-weight: 600; }
+#oeb-root .sig-param         { color: var(--ody-n200); }
+#oeb-root .sig-param-opt     { opacity: 0.7; }
+#oeb-root .sig-param-active  { color: #ffcc80; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+#oeb-root .sig-sep           { color: var(--ody-n400); }
+#oeb-root .sig-desc          { font-family: var(--ody-font); font-size: 11px; color: var(--ody-n300); line-height: 1.45; }
 #oeb-root .attr-key {
   font-family: var(--ody-mono); font-size: 11px; font-weight: 500;
   color: var(--ody-n900); flex-shrink: 0; min-width: 130px;
