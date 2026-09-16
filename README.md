@@ -17,7 +17,9 @@ A Chrome / Edge browser extension that injects a floating overlay into the Okta 
 ### Full expression + token preview
 
 - **Live evaluation** — expressions evaluate in real time against the selected user/app/context
-- **Full OEL coverage** — `String.*`, `Arrays.*`, `Time.*`, `Convert.*`, `Iso3166Convert.*`, group functions, manager/directory functions, ternary, Elvis (`?:`), null-coalescing (`??`), `AND`/`OR`, array index `[n]`, collection projection `.![expr]`, Identity Engine method chaining
+- **Full OEL coverage** — `String.*`, `Arrays.*`, `Time.*`, `Convert.*`, `Iso3166Convert.*`, group functions, manager/directory functions, ternary, Elvis (`?:`), null-coalescing (`??`), `AND`/`OR`, the `matches` operator, array index `[n]`, collection projection `.![expr]`, Identity Engine method chaining
+- **Group objects, not just names** — `user.getGroups(...)` returns full group records, so every documented projection works: `user.getGroups({'group.type':'OKTA_GROUP'}).![profile.name]`, `.![id]`, `.![lastMembershipUpdated]`. The plain `groups` string array is unchanged, so `Arrays.contains(groups, 'Engineering')` still reads the way it does in Okta.
+- **Deprecated constructs still evaluate** — the five unqualified string functions (`toUpperCase`, `substringBefore`, …) and the `matches` operator are documented as deprecated but still accepted by Okta's runtime, so they're implemented here too. Paste a legacy expression in and it evaluates; the Result tab adds an ⓘ note pointing at the current spelling, and the Reference tab badges them.
 - **OAuth-time variables** — `client.*`, `oauth_request.*`, `context.oauth2.*`, `context.device`, `context.session`, `context.security` — Okta claim expressions that reference these now resolve rather than throwing
 - **Full token preview** (OAuth Claims context) — pick **ID Token** or **Access Token**, pick **Org Auth Server** or any **Custom Authorization Server**. The extension fetches the server's real claim mappings (`/api/v1/authorizationServers/{id}/claims`) and evaluates every active claim in the current context. What you see IS what Okta would emit at runtime:
   - Claims whose `conditions.scopes` don't match the requested scopes are omitted
@@ -34,21 +36,21 @@ A Chrome / Edge browser extension that injects a floating overlay into the Okta 
   - Policy presets appear only in App Sign-On Policy
   - Token/Assertion preview tab appears only in OAuth Claims + SAML
   - Rule Preview tab appears only in Group Rules
-  - Context-specific expression warnings still fire (`appuser` in Group Rules, `Time.*` in Group Rules, `.status` in App Sign-On Policy, etc.)
-- **Policy presets** — six realistic combos for App Sign-On Policy testing (managed corp + pwd+MFA + low risk, unmanaged BYOD + high risk, Kerberos SSO, etc.) swap `device`/`session`/`security` in one click
+  - Context-specific expression warnings still fire, drawn from the restrictions the docs actually state: `appuser`/`Time.*`/`Convert.*` in Group Rules, `user.status` in Group Rules (use `getInternalProperty("status")`), `Groups.*` outside group claims, explicit app references in OIDC custom claims, `access.scope` in SAML, `DEPROVISIONED` as a `getInternalProperty("status")` value, and version strings compared with `<`/`>` instead of `versionGreaterThan()`
+- **Policy presets** — six realistic combos for App Sign-On Policy testing (managed corp + pwd+MFA + low risk, unmanaged BYOD + high risk, Kerberos SSO, etc.) swap `device`/`session`/`security` in one click. Each preset carries the full documented device signal surface — platform, disk encryption, screen lock assurance, the five `integrity*` booleans, Okta Verify / WSC / ZTA provider blocks, `security.behaviors` — not just `managed`/`registered`.
 
 ### Editor + Quick Insert
 
 - **Syntax highlighting** — expressions are color-coded in place: strings (green), numbers (orange), keywords like `null`/`AND`/`OR` (purple), namespaces (blue bold), roots (blue), function names (teal), operators/parens (grey). Uses a fixed-width font stack that falls back gracefully across macOS/Windows/Linux.
 - **Autocomplete with signature help** — type `.` after `user`, `appuser`, `app`, `String`, `Arrays`, etc. and pick a suggestion. Attribute completions show their live value + type inline (`email → "jane@acme.com"`, `groups → [5 items]`, `middleName → null`). Function completions show their param signature. Accepting a function inserts `()` with the cursor between them and immediately fires signature help (`Groups.contains(app, pattern, limit)` with the current arg highlighted). Arrow keys navigate, Enter/Tab inserts, Esc closes.
-- **String method chaining** — after a chain that resolves to a string value (`user.email.`), autocomplete suggests Identity Engine method-style completions (`substringBefore`, `toUpperCase`, `trim`, `parseStringTime`, etc.).
-- **Variable browser** — switch between `user`, `appuser`, `idpuser`, `org`, `app`, `access`, `device`, `session`, `security`; each shows a scrollable, searchable list of attributes with their current values (populated shown first, schema-declared nulls dimmed below).
-- **Templates library** — 60+ curated expressions organized by context (Profile Mapping, Active Directory, App Mapping, Group Rules, HR Integration, Security & Auth, Time & Date, IdP Attribute Mapping).
+- **String method chaining** — after a chain that resolves to a string value (`user.email.`), autocomplete suggests Identity Engine method-style completions (`substringBefore`, `toUpperCase`, `toInteger`, `parseStringTime`, `parseCountryCode`, `versionGreaterThan`, etc.). Chains on a date-time value offer the `withinDays` / `plusHours` / `toZone` family.
+- **Variable browser** — switch between `user`, `appuser`, `idpuser`, `org`, `app`, `access`, `device`, `session`, `security`, `login`, `accessRequest`; each shows a scrollable, searchable list of attributes with their current values (populated shown first, schema-declared nulls dimmed below).
+- **Templates library** — 100+ curated expressions organized by context, spanning all eight contexts including App Sign-On Policy device/risk signals and Access Certification.
 - **Function reference** — searchable docs for every OEL function with signatures, descriptions, and click-to-use examples.
 
 ### Correctness
 
-- **Strict OEL coverage** — only functions documented in Okta's OEL reference are implemented. Anything that looks like it should exist but doesn't (e.g. `String.match`, `Arrays.union`) is deliberately absent.
+- **Strict OEL coverage** — only constructs documented in Okta's [classic OEL reference](https://developer.okta.com/docs/reference/okta-expression-language/) or its [Identity Engine reference](https://developer.okta.com/docs/reference/okta-expression-language-in-identity-engine/) are implemented. Anything that looks like it should exist but isn't in the docs (`String.match`, `String.trim`, `Arrays.union`, `Arrays.intersection`, `Convert.toString`, the `.trim()`/`.len()` chain methods) is deliberately absent — an overlay that green-lights an expression Okta rejects is the same bug as one that rejects an expression Okta accepts. Constructs the docs mark **deprecated** are the one exception: Okta still runs them, so they're implemented and flagged rather than omitted.
 - **Arity + type enforcement** — every OEL function has a typed spec; the interpreter refuses to run a call with missing required args or wrong-type args, and produces errors that include the full signature: `Groups.startsWith(app, pattern, limit) — argument 2 ('pattern') must be string, got integer`.
 - **Pagination** — every listing endpoint (users, apps, groups, auth servers, claims) follows Okta's `Link: rel="next"` headers so large tenants get full results rather than the first page.
 
@@ -118,25 +120,39 @@ String.toUpperCase(user.department)
 String.stringContains(user.email, 'okta.com')
 String.replace(user.displayName, '\\s+', '.')
 String.stringSwitch(user.department, 'Other', 'Engineering', 'dev', 'IT', 'ops')
+String.substring(user.firstName, 0, 1)             // endIndex required in the namespace form
 
-// Arrays
+// Identity Engine method chaining
+user.email.substringBefore('@')
+user.firstName.substring(0, 1)                     // 1- and 2-arg overloads documented on the method form
+user.employeeNumber.toInteger()
+user.countryCode.parseCountryCode().toName()
+device.profile.osVersion.versionGreaterThan('14.0')
+
+// Arrays — a CSV string may be supplied anywhere an array is expected
 Arrays.contains(groups, 'Engineering')
+Arrays.contains('a,b,c', 'b')
 Arrays.toCsvString(groups)
-user.getGroups('Eng')
+Arrays.clear(groups)
+
+// Groups — user.getGroups returns full group records, so projections work
+user.getGroups({'group.type': 'OKTA_GROUP'}).![profile.name]
+user.isMemberOf({'group.profile.name': 'Eng'})     // operator defaults to STARTS_WITH
+isMemberOfGroupName('Engineering')
+isMemberOfAnyGroup('Admins', 'IT', 'DevOps')
+isMemberOfGroupNameStartsWith('IT_')
+getFilteredGroups({'00g1a2b3c4d5'}, 'group.name', 100)
 
 // Time
 Time.now('UTC', 'YYYY-MM-dd')
-Time.fromWindowsToIso8601(user.pwdLastSet)       // AD pwdLastSet → ISO 8601
-user.created.parseStringTime().withinDays(30)     // Identity Engine style
+Time.fromWindowsToIso8601(user.pwdLastSet)              // AD pwdLastSet → ISO 8601
+Time.fromStringToIso8601(user.hireDate, 'MM/dd/yyyy')   // format is required
+user.created.parseStringTime().withinDays(30)
+user.created.parseStringTime().toZone('Asia/Tokyo')     // real zone shift, not a no-op
 
 // Convert & Country
 Convert.toInt(user.employeeNumber)
 Iso3166Convert.toName(user.countryCode)
-
-// Groups
-isMemberOfGroupName('Engineering')
-isMemberOfAnyGroup('Admins', 'IT', 'DevOps')
-isMemberOfGroupNameStartsWith('IT_')
 
 // Org
 org.name
@@ -145,13 +161,17 @@ org.subDomain
 // Conditionals
 user.department == 'Engineering' ? 'dev' : 'user'
 user.nickName ?: user.firstName                   // Elvis operator
-user.isMemberOf({'group.profile.name': 'Admins'}) // Identity Engine
+
+// user.$property vs user.profile.$prop — Identity Engine distinguishes them
+user.status                                       // fixed set: id, status, created, lastUpdated, …
+user.profile.department                           // anything declared on the profile
 
 // AD / appuser
 appuser.sAMAccountName
 appuser.memberOf[0]
 Arrays.contains(appuser.memberOf, 'CN=Engineering,OU=Groups,DC=corp,DC=com')
 findDirectoryUser().sAMAccountName
+user.getLinkedObject('manager').lastName
 
 // IdP
 idpuser.email
@@ -165,9 +185,30 @@ oauth_request.scope
 context.oauth2.request.scope
 context.device.profile.managed
 
+// App Sign-On Policy — Identity Engine device / session / risk signals
+device.profile.platform                           // IOS | ANDROID | MACOS | WINDOWS | …
+device.profile.integrityJailbreak
+device.profile.diskEncryptionType
+device.assurance.screenLockType                   // BIOMETRIC | PASSCODE | NONE
+device.provider.zta.overall
+device.provider.oktaVerify.version.versionGreaterThan('9.20.0')
+security.risk.level                               // LOW | MEDIUM | HIGH
+Arrays.contains(security.behaviors, 'New IP')
+session.amr
+login.identifier
+
+// Access Certification
+accessRequest.metadata.type
+appuser.entitlements.role
+
 // Manager traversal (real profile fetched when the user has a managerId)
 getManagerUser(user).email
 getManagerUser(user).displayName
+
+// Deprecated but still accepted by Okta — these evaluate and get flagged
+toUpperCase(user.department)                      // → String.toUpperCase(...)
+substringBefore(user.email, '@')                  // → String.substringBefore(...)
+user.login matches '.*@acme.com'                  // whole-string match, hence the leading .*
 ```
 
 ---
@@ -180,7 +221,11 @@ getManagerUser(user).displayName
 ├── content.js         Overlay UI injected into the Okta admin console
 ├── overlay.css        Okta Odyssey-aligned styles (fully scoped under #oeb-root)
 ├── icons/
-│   └── icon.svg       Extension icon
+│   ├── icon.svg       Icon source, full detail → icon48.png + icon128.png
+│   ├── icon16.svg     Icon source, retuned for legibility at 16px → icon16.png
+│   ├── icon16.png     Toolbar icon
+│   ├── icon48.png     Extensions-page icon
+│   └── icon128.png    Store / install-dialog icon
 ├── CHANGELOG.md       Version history
 └── README.md
 ```
@@ -196,6 +241,26 @@ The extension is pure vanilla JS + CSS + HTML — no build step, no bundler, no 
 3. Edit any file — reload the extension from `chrome://extensions` and refresh your Okta admin tab to see changes
 4. Run a syntax sanity check before committing: `node --check evaluator.js && node --check content.js`
 
+The evaluator is testable headlessly, which beats clicking through the overlay for every change: it assigns a global, so `require('./evaluator.js')` works in plain Node with no DOM stubbing, and `evaluate()` returns `{success, result, error, deprecations}`. `content.js` needs more care — it's one IIFE with DOM access, so lift its data tables out by slicing lines rather than requiring the file, and find the slice boundaries by marker regex, since the tables move on every edit.
+
+Chrome and Edge do **not** support SVG for extension icons — only raster formats. The SVGs are the editable sources; the three PNGs beside them are what `manifest.json` actually references. There are two sources because the artwork is thin-stroked and illegible at 16px, so the toolbar icon uses a retuned variant (lighter background, thicker strokes, brighter accents). After editing either SVG, re-export (macOS, no extra tooling required):
+
+```sh
+# 48 + 128 from the full-detail source
+qlmanage -t -s 512 -o /tmp/oelicon icons/icon.svg
+for s in 48 128; do
+  cp /tmp/oelicon/icon.svg.png "icons/icon$s.png"
+  sips -Z $s "icons/icon$s.png"
+done
+
+# 16 from the small-size source
+qlmanage -t -s 512 -o /tmp/oelicon icons/icon16.svg
+cp /tmp/oelicon/icon16.svg.png icons/icon16.png
+sips -Z 16 icons/icon16.png
+```
+
+Rendering at 512 and downsampling gives smoother antialiasing than rendering each size natively. Keep the two sources visually in sync when changing the design.
+
 ### Architecture
 
 - `evaluator.js` — self-contained OEL implementation. Hand-written lexer (character-by-character), recursive-descent parser producing a small AST, and tree-walking interpreter. `OEL_SPECS` maps every function name to its full signature + typed parameters; the interpreter consults this at every call for arity + type validation. Exports a single global `OELEvaluator` class. Zero use of `eval()` or `new Function()` so the extension runs under strict CSPs.
@@ -208,7 +273,9 @@ The extension is pure vanilla JS + CSS + HTML — no build step, no bundler, no 
 Bugs and feature requests welcome via GitHub issues. When submitting a PR:
 
 - Keep the file layout — no build tools, no dependencies. This has to stay a load-unpacked extension anyone can inspect.
-- If you're adding an OEL function, verify it's in Okta's official OEL reference and add both an evaluator implementation and an `OEL_SPECS` entry (arity + typed params + full signature string).
+- If you're adding an OEL function, verify it's in Okta's official OEL reference — [classic](https://developer.okta.com/docs/reference/okta-expression-language/) or [Identity Engine](https://developer.okta.com/docs/reference/okta-expression-language-in-identity-engine/) — and cite where. Adding or removing one means editing **three** places or it half-works: the namespace implementation in `evaluator.js`, its `OEL_SPECS` entry (arity + typed params + full signature string), and its `FUNCTION_REFERENCE` entry in `content.js`.
+- Don't remove a function without checking the docs first. Release 1.3.0 removed eleven as "non-OEL" and five of them turned out to be documented; they had to be restored. If the docs mark something deprecated, implement it and set `deprecated` on its spec — don't omit it.
+- Any expression you add to `TEMPLATES` or as a `FUNCTION_REFERENCE` example has to evaluate against the shipped mock profile *and* all six policy presets. A silently-`null` example is a bug — if the mock data contradicts the example, fix the data.
 - Update `CHANGELOG.md` under an `[Unreleased]` section with a brief note under Added / Changed / Fixed.
 
 ---
@@ -220,7 +287,7 @@ Bugs and feature requests welcome via GitHub issues. When submitting a PR:
   - `/api/v1/sessions/me` — session gating
   - `/api/v1/org` — org name / subdomain
   - `/api/v1/users?q=...` and `/api/v1/users/{id}` — user search + manager lookup
-  - `/api/v1/users/{id}/groups` — group memberships
+  - `/api/v1/users/{id}/groups` — group memberships. The full group records are retained, not just their names: `groups` and `groupIds` stay the flat string arrays they've always been, and `id` / `type` / `created` / `lastUpdated` / `lastMembershipUpdated` / `profile.*` are kept alongside so `user.getGroups(...)` criteria and projections resolve against real data
   - `/api/v1/apps?q=...` — app search
   - `/api/v1/apps/{appId}/users/{userId}` — app-user assignment
   - `/api/v1/meta/schemas/user/default` and `/api/v1/meta/schemas/apps/{appId}/default` — declared attribute schemas

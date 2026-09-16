@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Okta Expression Builder",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Build and live-preview Okta Expression Language (OEL) expressions directly in the Okta admin console.",
   "permissions": [],
   "content_scripts": [
@@ -19,16 +19,16 @@
     }
   ],
   "icons": {
-    "16": "icons/icon.svg",
-    "48": "icons/icon.svg",
-    "128": "icons/icon.svg"
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   },
   "action": {
     "default_title": "Okta Expression Builder",
     "default_icon": {
-      "16": "icons/icon.svg",
-      "48": "icons/icon.svg",
-      "128": "icons/icon.svg"
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
     }
   }
 }

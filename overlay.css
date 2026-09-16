@@ -390,6 +390,9 @@
 #oeb-root .r-arr  { color: var(--ody-primary); }
 #oeb-root .r-obj  { color: var(--ody-n700); white-space: pre; }
 #oeb-root .r-err  { color: var(--ody-danger); font-family: var(--ody-font); font-size: 12px; }
+/* Trailing note beside a result that renders as a chainable object rather than a
+   final value (CountryCode). Prose, so it uses the UI font, not the mono stack. */
+#oeb-root .r-hint { color: var(--ody-n500); font-family: var(--ody-font); font-size: 11px; }
 
 #oeb-root .badge     { font-family: var(--ody-font); font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 100px; flex-shrink: 0; }
 #oeb-root .badge-ok  { background: var(--ody-success-lt); color: var(--ody-success); }
@@ -397,6 +400,10 @@
 
 #oeb-root .warnings-box { display: flex; flex-direction: column; gap: 5px; flex-shrink: 0; }
 #oeb-root .warn-item    { padding: 8px 12px; background: var(--ody-warning-lt); border: 1px solid var(--ody-warning-bd); border-radius: var(--ody-r); font-size: 12px; color: #7c4700; line-height: 1.5; }
+/* Deprecation notice. Deliberately not amber: an amber ⚠ row means Okta rejects
+   the expression, and a deprecated construct evaluates there just as it does
+   here. Same footprint, informational weight. */
+#oeb-root .warn-dep     { background: var(--ody-n50); border-color: var(--ody-border); color: var(--ody-n700); }
 
 /* ── Quick insert ─────────────────────────────────────────── */
 
@@ -596,6 +603,18 @@
 #oeb-root .ref-sig  { display: block; font-family: var(--ody-mono); font-size: 11px; font-weight: 500; color: var(--ody-primary); margin-bottom: 3px; }
 #oeb-root .ref-desc { font-size: 12px; color: var(--ody-n700); margin-bottom: 4px; line-height: 1.5; white-space: pre-line; }
 #oeb-root .ref-ex   { display: inline-block; font-family: var(--ody-mono); font-size: 11px; color: var(--ody-success); background: var(--ody-code-bg); padding: 2px 8px; border-radius: var(--ody-r); }
+
+/* Deprecated-but-documented entry. The badge sits on its own line because
+   .ref-sig is display:block, and the top-right corner is already taken by the
+   "Use ↗" hover affordance. Neutral rather than red: these still work in Okta,
+   which is the whole reason they're implemented. */
+#oeb-root .ref-fn-dep .ref-sig { color: var(--ody-n600); }
+#oeb-root .ref-dep {
+  display: inline-block; margin-bottom: 4px;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--ody-n700); background: var(--ody-n200);
+  padding: 1px 6px; border-radius: 100px;
+}
 
 /* ════════════════════════════════════════════════════════════
    TEMPLATES PANE

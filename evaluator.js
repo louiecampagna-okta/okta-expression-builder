@@ -22,32 +22,95 @@
 
   function pad(n, len = 2) { return String(n).padStart(len, '0'); }
 
-  function formatDate(d, fmt) {
-    return (fmt || 'yyyy-MM-dd\'T\'HH:mm:ss.SSSZ')
-      .replace('yyyy',  d.getUTCFullYear())
-      .replace('YYYY',  d.getUTCFullYear())
-      .replace('MM',    pad(d.getUTCMonth() + 1))
-      .replace('dd',    pad(d.getUTCDate()))
-      .replace('HH',    pad(d.getUTCHours()))
-      .replace('mm',    pad(d.getUTCMinutes()))
-      .replace('ss',    pad(d.getUTCSeconds()))
-      .replace('SSS',   pad(d.getUTCMilliseconds(), 3));
+  const DEFAULT_DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSZ";
+
+  // Calendar parts for an instant, read either in UTC or in a named IANA zone.
+  // Okta's `.toZone(zoneId)` shifts the wall-clock reading rather than the
+  // instant, so every formatter goes through here instead of the UTC getters.
+  function zonedParts(d, zone) {
+    if (!zone) {
+      return { year:d.getUTCFullYear(), month:d.getUTCMonth()+1, day:d.getUTCDate(),
+               hour:d.getUTCHours(), minute:d.getUTCMinutes(), second:d.getUTCSeconds(),
+               ms:d.getUTCMilliseconds(), offset:'Z' };
+    }
+    const parts = {};
+    for (const p of new Intl.DateTimeFormat('en-US', {
+      timeZone: zone, hourCycle: 'h23',
+      year:'numeric', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', second:'2-digit',
+      timeZoneName:'longOffset',
+    }).formatToParts(d)) parts[p.type] = p.value;
+    // longOffset renders as "GMT+09:00", or bare "GMT" at zero offset.
+    const off = (parts.timeZoneName || '').replace(/^GMT/, '') || 'Z';
+    return { year:+parts.year, month:+parts.month, day:+parts.day,
+             hour:+parts.hour, minute:+parts.minute, second:+parts.second,
+             ms:d.getUTCMilliseconds(), offset:off };
+  }
+
+  // Ordered longest-first within each casing so no token is shadowed.
+  const DATE_TOKENS = [
+    ['yyyy', p => p.year],        ['YYYY', p => p.year],
+    ['SSS',  p => pad(p.ms, 3)],
+    ['MM',   p => pad(p.month)],  ['dd',   p => pad(p.day)],
+    ['HH',   p => pad(p.hour)],   ['mm',   p => pad(p.minute)],
+    ['ss',   p => pad(p.second)], ['Z',    p => p.offset],
+  ];
+
+  // Joda-style pattern formatter, which is what Okta's Time.* format params
+  // take. Text inside single quotes is a literal, so `yyyy-MM-dd'T'HH:mm:ss`
+  // renders a bare T rather than treating it as a token; '' is an escaped quote.
+  function formatDate(d, fmt, zone) {
+    const p   = zonedParts(d, zone);
+    const src = fmt || DEFAULT_DATE_FORMAT;
+    let out = '';
+    for (let i = 0; i < src.length; ) {
+      if (src[i] === "'") {
+        const end = src.indexOf("'", i + 1);
+        if (end < 0) { out += src.slice(i + 1); break; }
+        out += end === i + 1 ? "'" : src.slice(i + 1, end);
+        i = end + 1;
+        continue;
+      }
+      const tok = DATE_TOKENS.find(([t]) => src.startsWith(t, i));
+      if (tok) { out += tok[1](p); i += tok[0].length; }
+      else     { out += src[i]; i++; }
+    }
+    return out;
+  }
+
+  // Throws on an unknown zone so a typo surfaces as an expression error rather
+  // than silently formatting in UTC.
+  function assertZone(zoneId) {
+    try { new Intl.DateTimeFormat('en-US', { timeZone: String(zoneId) }); }
+    catch { throw new Error(`unknown time zone '${zoneId}'`); }
+    return String(zoneId);
   }
 
   class OELDateTime {
-    constructor(date) {
+    constructor(date, zone = null) {
       this._d = date instanceof Date ? new Date(date) : new Date(date);
+      this._zone = zone;
+      // Lets content.js render this as a timestamp instead of dumping the
+      // object shape through JSON.stringify.
+      this._isOELDateTime = true;
     }
-    // Formatting
-    toString(fmt)     { return fmt ? formatDate(this._d, fmt) : this._d.toISOString(); }
+    // Formatting. `fmt` carries an explicit default so Function.length reports 0
+    // — chain-method arity falls back to JS length, which would otherwise make
+    // the documented bare `.toString()` an arity error.
+    toString(fmt = undefined) {
+      if (fmt)         return formatDate(this._d, fmt, this._zone);
+      if (this._zone)  return formatDate(this._d, DEFAULT_DATE_FORMAT, this._zone);
+      return this._d.toISOString();
+    }
     toUnix()          { return String(Math.floor(this._d.getTime() / 1000)); }
     toWindows()       { return String((this._d.getTime() + 11644473600000) * 10000); }
-    toZone()          { return this; } // timezone conversion is a no-op in the mock
-    // Arithmetic
-    plusDays(n)       { const d = new Date(this._d); d.setUTCDate(d.getUTCDate() + n);       return new OELDateTime(d); }
-    plusHours(n)      { const d = new Date(this._d); d.setUTCHours(d.getUTCHours() + n);     return new OELDateTime(d); }
-    plusMinutes(n)    { const d = new Date(this._d); d.setUTCMinutes(d.getUTCMinutes() + n); return new OELDateTime(d); }
-    plusSeconds(n)    { const d = new Date(this._d); d.setUTCSeconds(d.getUTCSeconds() + n); return new OELDateTime(d); }
+    // Shifts the wall-clock reading; the underlying instant is unchanged.
+    toZone(zoneId)    { return zoneId == null ? this : new OELDateTime(this._d, assertZone(zoneId)); }
+    // Arithmetic — the zone rides along so `.toZone(z).plusDays(1)` stays in z.
+    plusDays(n)       { const d = new Date(this._d); d.setUTCDate(d.getUTCDate() + n);       return new OELDateTime(d, this._zone); }
+    plusHours(n)      { const d = new Date(this._d); d.setUTCHours(d.getUTCHours() + n);     return new OELDateTime(d, this._zone); }
+    plusMinutes(n)    { const d = new Date(this._d); d.setUTCMinutes(d.getUTCMinutes() + n); return new OELDateTime(d, this._zone); }
+    plusSeconds(n)    { const d = new Date(this._d); d.setUTCSeconds(d.getUTCSeconds() + n); return new OELDateTime(d, this._zone); }
     minusDays(n)      { return this.plusDays(-n); }
     minusHours(n)     { return this.plusHours(-n); }
     minusMinutes(n)   { return this.plusMinutes(-n); }
@@ -61,6 +124,46 @@
     static fromIso(s)     { return new OELDateTime(new Date(String(s))); }
     static fromUnix(s)    { return new OELDateTime(new Date(Number(s) * 1000)); }
     static fromWindows(s) { return new OELDateTime(new Date((Number(s) / 10000) - 11644473600000)); }
+    static fromString(s, fmt) { return fmt ? parseWithFormat(s, fmt) : OELDateTime.fromIso(s); }
+  }
+
+  // Joda parse tokens → [regex fragment, target field].
+  const PARSE_TOKENS = [
+    ['yyyy', 'year',   '(\\d{4})'],   ['YYYY', 'year',   '(\\d{4})'],
+    ['SSS',  'ms',     '(\\d{1,3})'],
+    ['MM',   'month',  '(\\d{1,2})'], ['dd',   'day',    '(\\d{1,2})'],
+    ['HH',   'hour',   '(\\d{1,2})'], ['mm',   'minute', '(\\d{1,2})'],
+    ['ss',   'second', '(\\d{1,2})'],
+  ];
+
+  const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  // Reads a timestamp positionally against a Joda pattern. Without this, a
+  // format argument is ignored and `'01/02/2024'.parseStringTime('MM/dd/yyyy')`
+  // falls through to Date's loose parsing and quietly returns the wrong day.
+  // Returns null when the input doesn't match the pattern.
+  function parseWithFormat(s, fmt) {
+    if (s == null) return null;
+    const src = String(fmt);
+    const fields = [];
+    let re = '';
+    for (let i = 0; i < src.length; ) {
+      if (src[i] === "'") {
+        const end = src.indexOf("'", i + 1);
+        const lit = end < 0 ? src.slice(i + 1) : (end === i + 1 ? "'" : src.slice(i + 1, end));
+        re += reEscape(lit);
+        i = end < 0 ? src.length : end + 1;
+        continue;
+      }
+      const tok = PARSE_TOKENS.find(([t]) => src.startsWith(t, i));
+      if (tok) { re += tok[2]; fields.push(tok[1]); i += tok[0].length; }
+      else     { re += reEscape(src[i]); i++; }
+    }
+    const m = String(s).match(new RegExp('^' + re + '$'));
+    if (!m) return null;
+    const v = { year:1970, month:1, day:1, hour:0, minute:0, second:0, ms:0 };
+    fields.forEach((f, idx) => { v[f] = Number(m[idx + 1]); });
+    return new OELDateTime(new Date(Date.UTC(v.year, v.month - 1, v.day, v.hour, v.minute, v.second, v.ms)));
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -74,7 +177,7 @@
     QUESTION:'QUESTION', COLON:'COLON', ELVIS:'ELVIS',
     PLUS:'PLUS', MINUS:'MINUS', STAR:'STAR', SLASH:'SLASH', PERCENT:'PERCENT',
     EQ:'EQ', NEQ:'NEQ', LT:'LT', GT:'GT', LTE:'LTE', GTE:'GTE',
-    AND:'AND', OR:'OR', BANG:'BANG',
+    AND:'AND', OR:'OR', BANG:'BANG', MATCHES:'MATCHES',
     LBRACE:'LBRACE', RBRACE:'RBRACE',
     EOF:'EOF',
   });
@@ -121,11 +224,17 @@
       const s = this.pos;
       while (this.at() && /[\w$]/.test(this.peek())) this.pos++;
       const w = this.src.slice(s, this.pos);
+      // `matches` is a keyword only in operator position. Unlike AND/OR/not it's
+      // a lowercase word that's entirely plausible as a profile attribute or a
+      // group name key, so a bare rule would turn `user.matches` into a parse
+      // error instead of a null read. A word straight after a '.' is a property.
+      const afterDot = this.result.length && this.result[this.result.length-1].type === T.DOT;
       if      (w === 'true' || w === 'false') this.result.push({ type: T.BOOL, value: w === 'true' });
       else if (w === 'null')                  this.result.push({ type: T.NULL });
       else if (w === 'AND')                   this.result.push({ type: T.AND });
       else if (w === 'OR')                    this.result.push({ type: T.OR });
       else if (w === 'not')                   this.result.push({ type: T.BANG });
+      else if (w === 'matches' && !afterDot)  this.result.push({ type: T.MATCHES });
       else                                    this.result.push({ type: T.IDENT, value: w });
     }
 
@@ -216,9 +325,12 @@
       }
       return l;
     }
+    // `matches` sits here because that's SpEL's precedence for it: relational,
+    // so `user.login matches '.*@acme.com' AND user.status == 'ACTIVE'` groups
+    // the way an author reads it without parentheses.
     parseRel() {
       let l = this.parseAdd();
-      const m = {[T.LT]:'<',[T.GT]:'>',[T.LTE]:'<=',[T.GTE]:'>='};
+      const m = {[T.LT]:'<',[T.GT]:'>',[T.LTE]:'<=',[T.GTE]:'>=',[T.MATCHES]:'matches'};
       while (this.peek().type in m) { const op=m[this.consume().type]; l={type:'Binary',op,left:l,right:this.parseAdd()}; }
       return l;
     }
@@ -295,22 +407,36 @@
         this.expect(T.RBRACKET);
         return {type:'ArrayLit', elems};
       }
-      // Object literal: {'key': value, key: value}
+      // Brace literal. SpEL spells an inline *list* `{a, b}` and an inline *map*
+      // `{'k': v}` with the same delimiter, so which one this is only becomes
+      // clear at the first colon. Both forms appear in Okta's docs — the allow
+      // list in `getFilteredGroups({'00g…','00g…'}, 'group.name', 100)` is a
+      // list, the criteria in `user.isMemberOf({'group.profile.name':'Eng'})`
+      // is a map — so decide per entry rather than assuming.
       if (t.type===T.LBRACE) {
         this.consume();
-        const pairs=[];
+        if (this.is(T.RBRACE)) { this.consume(); return {type:'ArrayLit', elems:[]}; }
+        const pairs=[], elems=[];
+        let isMap=null;
         while (!this.is(T.RBRACE,T.EOF)) {
-          // key can be a string literal or an identifier
-          const keyTok = this.consume();
-          const key = (keyTok.type===T.STRING||keyTok.type===T.IDENT) ? keyTok.value
-                    : String(keyTok.value ?? keyTok.type);
-          this.expect(T.COLON);
-          const val = this.parseExpr();
-          pairs.push({key, val});
+          const keyTok = this.peek();
+          // A map key is a string literal or bare identifier followed by ':'.
+          const mapEntry = (keyTok.type===T.STRING||keyTok.type===T.IDENT)
+                        && this.peekAt(1) && this.peekAt(1).type===T.COLON;
+          if (isMap !== null && isMap !== mapEntry) {
+            this.err("cannot mix 'key: value' pairs and plain values inside {}");
+          }
+          isMap = mapEntry;
+          if (mapEntry) {
+            this.consume(); this.consume();          // key, colon
+            pairs.push({key: keyTok.value, val: this.parseExpr()});
+          } else {
+            elems.push(this.parseExpr());
+          }
           if (this.is(T.COMMA)) this.consume();
         }
         this.expect(T.RBRACE);
-        return {type:'ObjectLit', pairs};
+        return isMap ? {type:'ObjectLit', pairs} : {type:'ArrayLit', elems};
       }
       this.err(`Unexpected token '${t.type}'${t.value!==undefined?` ('${t.value}')`:''}`);
     }
@@ -327,26 +453,111 @@
   //  INTERPRETER
   // ═══════════════════════════════════════════════════════════════
 
-  // String method aliases for Identity Engine chaining style
-  // (when a plain string has a method called on it that doesn't exist natively,
-  //  we fall back to the OEL String namespace equivalent)
+  // ISO 3166 lookup. Module scope rather than inside the evaluator closure
+  // because two callers need it: the `Iso3166Convert.*` namespace and the
+  // `.parseCountryCode()` chain method in STRING_METHOD_ALIASES below. The
+  // data is per-process constant, so there's nothing per-instance about it.
+  const COUNTRY_DATA = {
+    'US':{'alpha2':'US','alpha3':'USA','numeric':'840','name':'United States'},
+    'GB':{'alpha2':'GB','alpha3':'GBR','numeric':'826','name':'United Kingdom'},
+    'CA':{'alpha2':'CA','alpha3':'CAN','numeric':'124','name':'Canada'},
+    'DE':{'alpha2':'DE','alpha3':'DEU','numeric':'276','name':'Germany'},
+    'FR':{'alpha2':'FR','alpha3':'FRA','numeric':'250','name':'France'},
+    'AU':{'alpha2':'AU','alpha3':'AUS','numeric':'036','name':'Australia'},
+    'JP':{'alpha2':'JP','alpha3':'JPN','numeric':'392','name':'Japan'},
+    'IN':{'alpha2':'IN','alpha3':'IND','numeric':'356','name':'India'},
+    'United States':{'alpha2':'US','alpha3':'USA','numeric':'840','name':'United States'},
+    'United Kingdom':{'alpha2':'GB','alpha3':'GBR','numeric':'826','name':'United Kingdom'},
+  };
+  // `own()` rather than `COUNTRY_DATA[k]`: the key comes from a profile
+  // attribute, and a plain index would walk Object.prototype — so
+  // `Iso3166Convert.toName('constructor')` would find Object itself and
+  // report the country name as 'Object' (functions carry a `.name`).
+  const resolveCountry = (v) => {
+    if (!v) return null;
+    return own(COUNTRY_DATA, String(v).toUpperCase()) || own(COUNTRY_DATA, String(v)) || null;
+  };
+
+  // What `.parseCountryCode()` returns. A wrapper rather than a plain object so
+  // the interpreter's prototype-aware dispatch treats it like OELDateTime — its
+  // methods live on the prototype and are reached without the own-property
+  // restriction that applies to namespace literals.
+  class OELCountryCode {
+    constructor(rec) { this._rec = rec; }
+    get _isOELCountryCode() { return true; }
+    toAlpha2()  { return this._rec ? this._rec.alpha2  : null; }
+    toAlpha3()  { return this._rec ? this._rec.alpha3  : null; }
+    toNumeric() { return this._rec ? this._rec.numeric : null; }
+    toName()    { return this._rec ? this._rec.name    : null; }
+    // An unrecognized code yields an object whose accessors all answer null,
+    // matching how every other OEL lookup degrades. Rendering it needs
+    // *something*, so fall back to the input.
+    toString()  { return this._rec ? this._rec.alpha2 : null; }
+  }
+
+  // Segment-wise version compare, for `device.profile.osVersion` and
+  // `device.provider.oktaVerify.version`. Returns -1/0/1. String comparison is
+  // what these methods exist to avoid: '14.10' < '14.9' lexically but is the
+  // later release. Missing segments count as 0, so '14' == '14.0.0'.
+  const compareVersions = (a, b) => {
+    const pa = String(a).split('.'), pb = String(b).split('.');
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const na = parseInt(pa[i], 10) || 0, nb = parseInt(pb[i], 10) || 0;
+      if (na !== nb) return na < nb ? -1 : 1;
+    }
+    return 0;
+  };
+
+  // Identity Engine method-chaining style on string values (`user.email.
+  // substringBefore('@')`). This is an allow list, not a fallback: it's the
+  // complete set of methods callable on a string, so a native JS method that
+  // isn't listed here is rejected rather than silently evaluated.
+  // Deliberately absent: .trim(), .len(), .startsWith(), .endsWith() — none are
+  // in Okta's reference. `String.len(str)` (namespace form) IS documented and
+  // stays; only the chain alias is gone.
   const STRING_METHOD_ALIASES = {
     toUpperCase:     (s)     => String(s).toUpperCase(),
     toLowerCase:     (s)     => String(s).toLowerCase(),
-    trim:            (s)     => String(s).trim(),
     removeSpaces:    (s)     => String(s).replace(/\s+/g,''),
     length:          (s)     => String(s).length,
-    len:             (s)     => String(s).length,
     contains:        (s,sub) => String(s).includes(String(sub)),
-    startsWith:      (s,pre) => String(s).startsWith(String(pre)),
-    endsWith:        (s,suf) => String(s).endsWith(String(suf)),
     substring:       (s,a,b=undefined) => b!=null ? String(s).substring(a,b) : String(s).substring(a),
     substringBefore: (s,d)   => { const i=String(s).indexOf(String(d)); return i<0?String(s):String(s).substring(0,i); },
     substringAfter:  (s,d)   => { const i=String(s).indexOf(String(d)); return i<0?'':String(s).substring(i+String(d).length); },
     replace:         (s,p,r) => String(s).replace(new RegExp(String(p),'g'),r??''),
     replaceFirst:    (s,p,r) => String(s).replace(new RegExp(String(p)),r??''),
-    // Identity Engine time parse methods on date strings
-    parseStringTime: (s)     => OELDateTime.fromIso(s),
+
+    // Identity Engine conversion methods.
+    toInteger:       (s)     => { const n = parseInt(String(s), 10);  return isNaN(n) ? null : n; },
+    toNumber:        (s)     => { const n = parseFloat(String(s));    return isNaN(n) ? null : n; },
+
+    // Identity Engine time parse methods. `parseStringTime` reads ISO 8601 with
+    // no argument and a Joda pattern with one — passing a format used to be
+    // accepted and ignored, which let a non-ISO input fall through to Date's
+    // loose parsing and come back as the wrong day.
+    parseStringTime:   (s, fmt = undefined) => OELDateTime.fromString(s, fmt),
+    parseUnixTime:     (s)   => OELDateTime.fromUnix(s),
+    parseWindowsTime:  (s)   => OELDateTime.fromWindows(s),
+
+    // Country conversion. Returns a chainable CountryCode object, so the
+    // documented form is `user.countryCode.parseCountryCode().toName()`.
+    parseCountryCode:  (s)   => new OELCountryCode(resolveCountry(s)),
+
+    // Version comparison. These are documented on the device version strings
+    // specifically, but they're string methods — nothing restricts the receiver.
+    versionGreaterThan: (s, other) => compareVersions(s, other) > 0,
+    versionLessThan:    (s, other) => compareVersions(s, other) < 0,
+  };
+
+  // Methods documented on numeric values. A number-typed profile attribute
+  // needs its own table for the same reason strings do: Number.prototype
+  // carries .toFixed/.toPrecision/.toString, which would otherwise evaluate
+  // here as though they were OEL.
+  const NUMBER_METHOD_ALIASES = {
+    toInteger:        (n) => Math.trunc(Number(n)),
+    toNumber:         (n) => Number(n),
+    parseUnixTime:    (n) => OELDateTime.fromUnix(n),
+    parseWindowsTime: (n) => OELDateTime.fromWindows(n),
   };
 
   // Array method aliases
@@ -362,7 +573,12 @@
   // Types for argument validation. `any` skips the check (rare — most params
   // have known shapes). `integer` is checked separately from `number` because
   // many OEL functions specifically want an integer limit/index/count.
-  const AT = { STR:'string', INT:'integer', NUM:'number', BOOL:'boolean', ARR:'array', OBJ:'object', ANY:'any' };
+  // CSVARR exists because Okta documents that "CSV strings may be supplied as
+  // input to all Arrays* functions" — so those params accept an array or a
+  // comma-separated string, and nothing else. Typing them AT.ANY would accept
+  // an integer too and lose the error message.
+  const AT = { STR:'string', INT:'integer', NUM:'number', BOOL:'boolean', ARR:'array',
+               CSVARR:'array or CSV string', OBJ:'object', ANY:'any' };
 
   // Specs for every namespaced OEL function + the top-level ones we ship.
   // Keyed by full name (e.g. "Groups.startsWith"). The interpreter uses this
@@ -379,7 +595,10 @@
     'String.join':            { sig:'String.join(sep, str1[, str2, ...])',      params:[{n:'sep',t:AT.STR},{n:'str',t:AT.ANY}], rest:true },
     'String.toUpperCase':     { sig:'String.toUpperCase(str)',                  params:[{n:'str',t:AT.STR}] },
     'String.toLowerCase':     { sig:'String.toLowerCase(str)',                  params:[{n:'str',t:AT.STR}] },
-    'String.substring':       { sig:'String.substring(str, start[, end])',      params:[{n:'str',t:AT.STR},{n:'start',t:AT.INT},{n:'end',t:AT.INT,optional:true}] },
+    // Classic documents the namespace form with all three args. The 1- and
+    // 2-arg overloads live on the *method* form (`user.email.substring(4)`),
+    // which Identity Engine documents separately and specs don't cover.
+    'String.substring':       { sig:'String.substring(input, startIndex, endIndex)', params:[{n:'input',t:AT.STR},{n:'startIndex',t:AT.INT},{n:'endIndex',t:AT.INT}] },
     'String.substringBefore': { sig:'String.substringBefore(str, delimiter)',   params:[{n:'str',t:AT.STR},{n:'delimiter',t:AT.STR}] },
     'String.substringAfter':  { sig:'String.substringAfter(str, delimiter)',    params:[{n:'str',t:AT.STR},{n:'delimiter',t:AT.STR}] },
     'String.replace':         { sig:'String.replace(str, pattern, replacement)',params:[{n:'str',t:AT.STR},{n:'pattern',t:AT.STR},{n:'replacement',t:AT.STR}] },
@@ -387,19 +606,22 @@
     'String.stringContains':  { sig:'String.stringContains(str, substring)',    params:[{n:'str',t:AT.STR},{n:'substring',t:AT.STR}] },
     'String.startsWith':      { sig:'String.startsWith(str, prefix)',           params:[{n:'str',t:AT.STR},{n:'prefix',t:AT.STR}] },
     'String.removeSpaces':    { sig:'String.removeSpaces(str)',                 params:[{n:'str',t:AT.STR}] },
-    'String.trim':            { sig:'String.trim(str)',                         params:[{n:'str',t:AT.STR}] },
     'String.stringSwitch':    { sig:'String.stringSwitch(input, default, k1, v1[, k2, v2, ...])',
                                 params:[{n:'input',t:AT.ANY},{n:'default',t:AT.ANY},{n:'key',t:AT.ANY},{n:'value',t:AT.ANY}], rest:true },
-    'String.toString':        { sig:'String.toString(value)',                   params:[{n:'value',t:AT.ANY}] },
+    // Deliberately absent: String.trim and String.toString. Neither appears in
+    // Okta's reference. Use String.removeSpaces or Convert.toInt/toNum instead.
 
     // ── Arrays namespace ─────────────────────────────────────────────────
-    'Arrays.contains':     { sig:'Arrays.contains(array, element)',   params:[{n:'array',t:AT.ARR},{n:'element',t:AT.ANY}] },
-    'Arrays.size':         { sig:'Arrays.size(array)',                params:[{n:'array',t:AT.ARR}] },
-    'Arrays.isEmpty':      { sig:'Arrays.isEmpty(array)',             params:[{n:'array',t:AT.ARR}] },
-    'Arrays.add':          { sig:'Arrays.add(array, element)',        params:[{n:'array',t:AT.ARR},{n:'element',t:AT.ANY}] },
-    'Arrays.remove':       { sig:'Arrays.remove(array, element)',     params:[{n:'array',t:AT.ARR},{n:'element',t:AT.ANY}] },
-    'Arrays.get':          { sig:'Arrays.get(array, index)',          params:[{n:'array',t:AT.ARR},{n:'index',t:AT.INT}] },
-    'Arrays.toCsvString':  { sig:'Arrays.toCsvString(array)',         params:[{n:'array',t:AT.ARR}] },
+    // Every `array` param is CSVARR: the docs allow a CSV string anywhere an
+    // array is expected, and the impls coerce at the boundary.
+    'Arrays.contains':     { sig:'Arrays.contains(array, element)',   params:[{n:'array',t:AT.CSVARR},{n:'element',t:AT.ANY}] },
+    'Arrays.size':         { sig:'Arrays.size(array)',                params:[{n:'array',t:AT.CSVARR}] },
+    'Arrays.isEmpty':      { sig:'Arrays.isEmpty(array)',             params:[{n:'array',t:AT.CSVARR}] },
+    'Arrays.add':          { sig:'Arrays.add(array, element)',        params:[{n:'array',t:AT.CSVARR},{n:'element',t:AT.ANY}] },
+    'Arrays.remove':       { sig:'Arrays.remove(array, element)',     params:[{n:'array',t:AT.CSVARR},{n:'element',t:AT.ANY}] },
+    'Arrays.get':          { sig:'Arrays.get(array, index)',          params:[{n:'array',t:AT.CSVARR},{n:'index',t:AT.INT}] },
+    'Arrays.clear':        { sig:'Arrays.clear(array)',                params:[{n:'array',t:AT.CSVARR}] },
+    'Arrays.toCsvString':  { sig:'Arrays.toCsvString(array)',         params:[{n:'array',t:AT.CSVARR}] },
     'Arrays.flatten':      { sig:'Arrays.flatten(...values)',         params:[{n:'value',t:AT.ANY}], rest:true },
 
     // ── Time namespace ───────────────────────────────────────────────────
@@ -408,13 +630,14 @@
     'Time.fromIso8601ToUnix':    { sig:'Time.fromIso8601ToUnix(iso)',                 params:[{n:'iso',t:AT.STR}] },
     'Time.fromWindowsToIso8601': { sig:'Time.fromWindowsToIso8601(filetime)',         params:[{n:'filetime',t:AT.ANY}] },
     'Time.fromIso8601ToWindows': { sig:'Time.fromIso8601ToWindows(iso)',              params:[{n:'iso',t:AT.STR}] },
-    'Time.fromStringToIso8601':  { sig:'Time.fromStringToIso8601(string)',            params:[{n:'string',t:AT.STR}] },
+    'Time.fromStringToIso8601':  { sig:'Time.fromStringToIso8601(time, format)',       params:[{n:'time',t:AT.STR},{n:'format',t:AT.STR}] },
     'Time.fromIso8601ToString':  { sig:'Time.fromIso8601ToString(iso, format)',       params:[{n:'iso',t:AT.STR},{n:'format',t:AT.STR}] },
 
     // ── Convert namespace ────────────────────────────────────────────────
     'Convert.toInt':    { sig:'Convert.toInt(value)',    params:[{n:'value',t:AT.ANY}] },
     'Convert.toNum':    { sig:'Convert.toNum(value)',    params:[{n:'value',t:AT.ANY}] },
-    'Convert.toString': { sig:'Convert.toString(value)', params:[{n:'value',t:AT.ANY}] },
+    // Deliberately absent: Convert.toString. Okta documents only toInt and toNum
+    // on this namespace.
 
     // ── Iso3166Convert namespace ─────────────────────────────────────────
     'Iso3166Convert.toAlpha2':  { sig:'Iso3166Convert.toAlpha2(value)',  params:[{n:'value',t:AT.STR}] },
@@ -430,6 +653,22 @@
     // ── DateTime namespace ───────────────────────────────────────────────
     'DateTime.now': { sig:'DateTime.now()', params:[] },
 
+    // ── User-object methods ──────────────────────────────────────────────
+    // Both take one or more criteria objects, ANDed. Specs exist so a bare
+    // `user.isMemberOf()` reports the signature instead of silently returning
+    // false — the variadic impls have a JS .length of 0, so the fallback
+    // arity check can't catch it.
+    'user.isMemberOf': { sig:"user.isMemberOf({'group.profile.name': 'Eng'}[, ...])",
+                         params:[{n:'criteria',t:AT.ANY}], rest:true },
+    // getGroups' criteria are optional — the bare form returns every group,
+    // which is what the documented projection example relies on.
+    'user.getGroups':  { sig:"user.getGroups([criteria, ...])",
+                         params:[{n:'criteria',t:AT.ANY,optional:true}], rest:true },
+    'user.getLinkedObject':     { sig:'user.getLinkedObject(primaryName)',
+                                  params:[{n:'primaryName',t:AT.STR}] },
+    'user.getInternalProperty': { sig:'user.getInternalProperty(name)',
+                                  params:[{n:'name',t:AT.STR}] },
+
     // ── Top-level (Call) functions ───────────────────────────────────────
     'isMemberOfGroupName':           { sig:'isMemberOfGroupName(name)',           params:[{n:'name',t:AT.STR}] },
     'isMemberOfGroup':               { sig:'isMemberOfGroup(groupId)',            params:[{n:'groupId',t:AT.STR}] },
@@ -437,8 +676,8 @@
     'isMemberOfGroupNameStartsWith': { sig:'isMemberOfGroupNameStartsWith(prefix)',params:[{n:'prefix',t:AT.STR}] },
     'isMemberOfGroupNameContains':   { sig:'isMemberOfGroupNameContains(substring)',params:[{n:'substring',t:AT.STR}] },
     'isMemberOfGroupNameRegex':      { sig:'isMemberOfGroupNameRegex(regex)',     params:[{n:'regex',t:AT.STR}] },
-    'getFilteredGroups':             { sig:'getFilteredGroups(whitelist[, format[, limit]])',
-                                       params:[{n:'whitelist',t:AT.ARR},{n:'format',t:AT.STR,optional:true},{n:'limit',t:AT.INT,optional:true}] },
+    'getFilteredGroups':             { sig:'getFilteredGroups(allowList, group_expression, limit)',
+                                       params:[{n:'allowList',t:AT.ARR},{n:'group_expression',t:AT.STR},{n:'limit',t:AT.INT}] },
     'getManagerUser':                { sig:'getManagerUser(source)',              params:[{n:'source',t:AT.ANY}] },
     'getManagerAppUser':             { sig:'getManagerAppUser(source, attribute)',params:[{n:'source',t:AT.ANY},{n:'attribute',t:AT.STR}] },
     'getAssistantUser':              { sig:'getAssistantUser(source)',            params:[{n:'source',t:AT.ANY}] },
@@ -447,6 +686,74 @@
     'findDirectoryUser':             { sig:'findDirectoryUser()',                 params:[] },
     'hasWorkdayUser':                { sig:'hasWorkdayUser()',                    params:[] },
     'findWorkdayUser':               { sig:'findWorkdayUser()',                   params:[] },
+
+    // ── Deprecated, but documented ───────────────────────────────────────
+    // Okta's reference still lists these five unqualified forms and its runtime
+    // still accepts them, so a legacy expression pasted into the builder has to
+    // evaluate rather than error. `deprecated` carries the replacement note
+    // instead of a bare true: it's the text the Result tab shows, and having one
+    // home for it keeps the message from drifting from the flag.
+    'toUpperCase':     { sig:'toUpperCase(str)',              params:[{n:'str',t:AT.STR}],
+                         deprecated:'toUpperCase(str) is deprecated — use String.toUpperCase(str)' },
+    'toLowerCase':     { sig:'toLowerCase(str)',              params:[{n:'str',t:AT.STR}],
+                         deprecated:'toLowerCase(str) is deprecated — use String.toLowerCase(str)' },
+    'substring':       { sig:'substring(input, startIndex, endIndex)',
+                         params:[{n:'input',t:AT.STR},{n:'startIndex',t:AT.INT},{n:'endIndex',t:AT.INT}],
+                         deprecated:'substring(input, startIndex, endIndex) is deprecated — use String.substring(...)' },
+    'substringBefore': { sig:'substringBefore(str, delimiter)', params:[{n:'str',t:AT.STR},{n:'delimiter',t:AT.STR}],
+                         deprecated:'substringBefore(str, delimiter) is deprecated — use String.substringBefore(...)' },
+    'substringAfter':  { sig:'substringAfter(str, delimiter)',  params:[{n:'str',t:AT.STR},{n:'delimiter',t:AT.STR}],
+                         deprecated:'substringAfter(str, delimiter) is deprecated — use String.substringAfter(...)' },
+  };
+
+  // The `matches` operator has no OEL_SPECS entry — it's an operator, not a
+  // call — so its note lives here beside the table it would otherwise sit in.
+  const MATCHES_DEPRECATION =
+    "the 'matches' operator is deprecated — use String.replace / String.replaceFirst, " +
+    'or a regex-aware function, depending on what you need';
+
+  // Deprecated constructs an expression uses, read off the AST rather than
+  // observed during evaluation: `cond ? toUpperCase(a) : b` should be flagged
+  // whichever branch actually runs. Returns a Set of note strings.
+  function collectDeprecations(node, out = new Set()) {
+    if (!node || typeof node !== 'object') return out;
+    if (node.type === 'Call') {
+      const spec = own(OEL_SPECS, node.name);
+      if (spec && spec.deprecated) out.add(spec.deprecated);
+    }
+    if (node.type === 'Binary' && node.op === 'matches') out.add(MATCHES_DEPRECATION);
+    for (const k of Object.keys(node)) {
+      const v = node[k];
+      if (Array.isArray(v)) v.forEach(c => collectDeprecations(c, out));
+      else if (v && typeof v === 'object' && typeof v.type === 'string') collectDeprecations(v, out);
+    }
+    return out;
+  }
+
+  // Own-property lookup. A bare `MAP[name]` walks the prototype chain, so
+  // `OEL_SPECS['toString']` would resolve to Object.prototype.toString — truthy
+  // but with no `.params` — and `STRING_METHOD_ALIASES['constructor']` would
+  // resolve to a callable that isn't an OEL function at all. Every lookup keyed
+  // by a user-supplied identifier has to go through this.
+  const own = (map, key) => Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined;
+
+  // Method lookup for a non-primitive receiver, walking the prototype chain but
+  // stopping short of Object.prototype. Both shapes the interpreter dispatches on
+  // are covered by the one rule:
+  //   · namespace object literals (String, Arrays, Time, …) hold their functions
+  //     as own properties, so the loop finds them on the first pass
+  //   · classes we define (OELDateTime, OELCountryCode) hold theirs on their own
+  //     prototype, so the loop finds them on the second
+  // Everything on Object.prototype is out of reach either way, which is the
+  // point: `String.toString(x)` must report an unknown function rather than
+  // answering "[object Object]", and `DateTime.now().hasOwnProperty('_d')` must
+  // not evaluate at all.
+  const findMethod = (obj, name) => {
+    for (let o = obj; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+      const v = own(o, name);
+      if (v !== undefined) return v;
+    }
+    return undefined;
   };
 
   // Type predicate. Nulls are always allowed (Okta's runtime treats null as a
@@ -459,6 +766,7 @@
     if (t === AT.NUM)     return typeof v === 'number' && !Number.isNaN(v);
     if (t === AT.BOOL)    return typeof v === 'boolean';
     if (t === AT.ARR)     return Array.isArray(v);
+    if (t === AT.CSVARR)  return Array.isArray(v) || typeof v === 'string';
     if (t === AT.OBJ)     return typeof v === 'object' && v !== null && !Array.isArray(v);
     return true;
   }
@@ -474,7 +782,7 @@
   // Falls back to the JS function's own .length for functions not in the
   // spec table (rare — mostly user-object methods like user.isMemberOf).
   function checkCall(fullName, fn, args) {
-    const spec = OEL_SPECS[fullName];
+    const spec = own(OEL_SPECS, fullName);
     if (!spec) {
       const required = fn.length;
       if (args.length < required) {
@@ -529,37 +837,47 @@
 
           if (obj == null) return null;
 
-          // Direct method on object (namespace member, plain JS, OELDateTime).
+          // Identity Engine method chaining on primitive strings/arrays. These
+          // are checked FIRST and are the *only* methods allowed on a primitive:
+          // JS strings and arrays carry their own native methods, so falling
+          // through to `obj[method]` would make `.charAt()`, `.padStart()`,
+          // `.concat()` and the rest evaluate here as though they were OEL — and
+          // would shadow the aliases whose names collide with a native one
+          // (`.substring`, `.toUpperCase`) with the native arity.
+          // The alias fn takes (obj, ...userArgs), so user-visible arity is
+          // fn.length - 1. Specs are namespace-keyed and don't cover chains, so
+          // arity comes from JS length and there's no type check.
+          if (typeof obj === 'string' || Array.isArray(obj)
+              || typeof obj === 'number' || typeof obj === 'boolean') {
+            const table = typeof obj === 'string' ? STRING_METHOD_ALIASES
+                        : Array.isArray(obj)      ? ARRAY_METHOD_ALIASES
+                        : typeof obj === 'number' ? NUMBER_METHOD_ALIASES
+                        : {};   // booleans have no documented methods
+            const kind  = Array.isArray(obj) ? 'array' : typeof obj;
+            const fn    = own(table, node.method);
+            if (!fn) throw new Error(`'.${node.method}(...)' is not an Okta Expression Language method on a ${kind}`);
+            if (args.length + 1 < fn.length) {
+              throw new Error(`'.${node.method}(...)' on ${kind} expected ${fn.length - 1} argument${(fn.length-1)===1?'':'s'} but got ${args.length}`);
+            }
+            return fn(obj, ...args);
+          }
+
+          // Direct method on an object (namespace member, OELDateTime, user).
           // If the object is a top-level namespace Ident (Groups/String/etc.),
           // we can derive the fully-qualified name for spec-based validation.
-          if (typeof obj[node.method] === 'function') {
-            const nsName  = node.object.type === 'Ident' ? node.object.name : null;
+          const nsName = node.object.type === 'Ident' ? node.object.name : null;
+
+          const fn = findMethod(obj, node.method);
+
+          if (typeof fn === 'function') {
             const fullName = nsName ? `${nsName}.${node.method}` : node.method;
-            checkCall(fullName, obj[node.method], args);
-            return obj[node.method](...args);
+            checkCall(fullName, fn, args);
+            return fn.apply(obj, args);
           }
 
-          // Identity Engine: method chaining on primitive strings/arrays.
-          // The JS function takes (obj, ...userArgs); user-visible arity is
-          // fn.length - 1. Type check falls back to JS-length only (specs are
-          // namespace-keyed and don't apply to method chains).
-          if (typeof obj === 'string' && STRING_METHOD_ALIASES[node.method]) {
-            const fn = STRING_METHOD_ALIASES[node.method];
-            if (args.length + 1 < fn.length) {
-              throw new Error(`'.${node.method}(...)' on string expected ${fn.length - 1} argument${(fn.length-1)===1?'':'s'} but got ${args.length}`);
-            }
-            return fn(obj, ...args);
-          }
-          if (Array.isArray(obj) && ARRAY_METHOD_ALIASES[node.method]) {
-            const fn = ARRAY_METHOD_ALIASES[node.method];
-            if (args.length + 1 < fn.length) {
-              throw new Error(`'.${node.method}(...)' on array expected ${fn.length - 1} argument${(fn.length-1)===1?'':'s'} but got ${args.length}`);
-            }
-            return fn(obj, ...args);
-          }
-
-          // OEL namespace method calls already handled via 'Member' lookup
-          throw new Error(`'${node.method}' is not a function on ${typeof obj}`);
+          throw new Error(nsName
+            ? `'${nsName}.${node.method}' is not an Okta Expression Language function`
+            : `'${node.method}' is not a function on ${typeof obj}`);
         }
 
         case 'Call': {
@@ -602,6 +920,17 @@
           if (node.op==='&&') { const l=this.eval(node.left); return l ? this.eval(node.right) : l; }
           if (node.op==='||') { const l=this.eval(node.left); return l ? l : this.eval(node.right); }
           const l=this.eval(node.left), r=this.eval(node.right);
+          // Deprecated `matches` operator. Java's String.matches semantics, which
+          // is what SpEL delegates to: the pattern must match the WHOLE string,
+          // so the documented `user.login matches '.*@example.com'` needs its
+          // leading `.*` — an unanchored fragment won't match a longer subject.
+          // A null subject is false rather than an error, like every other
+          // null read here.
+          if (node.op === 'matches') {
+            if (l == null || r == null) return false;
+            try { return new RegExp('^(?:' + String(r) + ')$').test(String(l)); }
+            catch { throw new Error(`invalid regular expression in 'matches': ${String(r)}`); }
+          }
           // eslint-disable-next-line eqeqeq
           switch (node.op) {
             case '+':  return (typeof l==='string'||typeof r==='string')
@@ -628,14 +957,87 @@
   //  CONTEXT FACTORY
   // ═══════════════════════════════════════════════════════════════
 
+  // Okta user-record fields that are NOT profile attributes. Used to split
+  // `user.profile.$prop` back out of the flattened user object. Wider than the
+  // six properties Okta documents for `user.$property` because these are all
+  // record-level fields that can arrive on a fetched user and must not show up
+  // as profile attributes.
+  const USER_RECORD_KEYS = new Set([
+    'id', 'status', 'created', 'activated', 'statusChanged', 'lastLogin',
+    'lastUpdated', 'passwordChanged', 'type', 'credentials', 'transitioningToStatus',
+    '_links', '_embedded', 'profile',
+  ]);
+
   function buildContext(profile) {
     const rawUser  = profile.user     || {};
     const org      = profile.org      || { name:'Example Org', subDomain:'example' };
     const groups   = profile.groups   || [];
     const groupIds = profile.groupIds || [];
+
+    // Full group records. Criteria matching reads keys the two flat arrays can't
+    // answer (`group.type`, `group.source.id`), and documented collection
+    // projections like `.![profile.name]` need real objects rather than strings.
+    // content.js supplies these from the /groups fetch; when they're absent
+    // (mock profile, or a caller passing only the name/id arrays) synthesize
+    // minimal records so name/id criteria still behave.
+    const groupObjects = Array.isArray(profile.groupObjects) && profile.groupObjects.length
+      ? profile.groupObjects
+      : groups.map((name, i) => ({ id: groupIds[i] ?? '', type: 'OKTA_GROUP',
+                                   profile: { name, description: null } }));
+
+    // Criteria keys Okta documents for group matching, and how to read each one
+    // off a group record.
+    const GROUP_CRITERIA_KEYS = {
+      'group.id':           (g) => g.id,
+      'group.type':         (g) => g.type,
+      'group.source.id':    (g) => g.source && g.source.id,
+      'group.profile.name': (g) => g.profile && g.profile.name,
+    };
+
+    // One criteria object vs one group. Documented semantics: `operator` is only
+    // meaningful for group.profile.name and defaults to STARTS_WITH (not EXACT);
+    // a key holding a list matches if ANY of its values match (OR).
+    function groupMatchesCriteria(g, criteria) {
+      if (!criteria || typeof criteria !== 'object' || Array.isArray(criteria)) return false;
+      const op = String(criteria['operator'] || 'STARTS_WITH').toUpperCase();
+      let sawKey = false;
+      for (const key of Object.keys(criteria)) {
+        if (key === 'operator') continue;
+        const read = own(GROUP_CRITERIA_KEYS, key);
+        if (!read) {
+          throw new Error(`unsupported group criteria key '${key}' — expected one of `
+            + Object.keys(GROUP_CRITERIA_KEYS).join(', '));
+        }
+        sawKey = true;
+        const actual = read(g);
+        if (actual == null) return false;
+        const wanted = Array.isArray(criteria[key]) ? criteria[key] : [criteria[key]];
+        const ok = wanted.some(w => (key === 'group.profile.name' && op === 'STARTS_WITH')
+          ? String(actual).startsWith(String(w))
+          : String(actual) === String(w));
+        if (!ok) return false;
+      }
+      return sawKey;
+    }
+
+    // Multiple criteria objects must ALL match (AND).
+    const groupsMatching = (criteriaList) =>
+      groupObjects.filter(g => criteriaList.every(c => groupMatchesCriteria(g, c)));
+    // ── Identity Engine runtime signals ───────────────────────────
+    // Fallbacks are deliberately thin: content.js supplies the full documented
+    // surface, and a caller that doesn't (the Group Rule preview, a bare
+    // `new OELEvaluator({})`) is better served by nulls than by invented signals
+    // that would make a policy expression look like it passes.
     const session  = profile.session  || { amr:['pwd','mfa'] };
     const security = profile.security || { risk:{ level:'LOW' } };
     const device   = profile.device   || { profile:{ managed:false, registered:false } };
+    // What the user typed at the sign-in widget. Distinct from user.login, which
+    // is the resolved account — they differ when the user signs in with an alias.
+    const login    = profile.login    || { identifier: rawUser.login ?? null };
+    // Identity Governance access-request context (Access Certification rules).
+    const accessRequest = profile.accessRequest || {
+      operation: null, authenticator: { id:null, key:null }, metadata: { type:null },
+    };
 
     // idpuser — attributes from an external Identity Provider (SAML / OIDC IdP).
     // Populated when the user authenticates through or is mastered from an external IdP.
@@ -647,12 +1049,31 @@
     // access — OAuth 2.0 access request context.
     const access   = profile.access   || { scope:[] };
 
+    // `user.profile.$prop` — Identity Engine separates the profile attributes
+    // from the record-level internals, which are read as `user.$property` (only
+    // id, status, created, lastUpdated, passwordChanged, lastLogin are
+    // documented there). Both forms have to work: this adds the namespaced one
+    // without disturbing the flattened access that `user.department` and every
+    // shipped template rely on. Derived by subtraction so any custom attribute
+    // is included automatically — an allow list would silently drop them.
+    const userProfileView = Object.assign(Object.create(null), (() => {
+      if (rawUser.profile && typeof rawUser.profile === 'object') return rawUser.profile;
+      const out = {};
+      for (const k of Object.keys(rawUser)) {
+        if (!USER_RECORD_KEYS.has(k)) out[k] = rawUser[k];
+      }
+      return out;
+    })());
+
     // User object — augmented with OEL built-in methods
     const user = Object.assign(Object.create(null), rawUser, {
-      getGroups(prefix = undefined, conditions = undefined, limit = undefined) {
-        let r = prefix ? groups.filter(g => g.startsWith(String(prefix))) : [...groups];
-        if (typeof limit==='number') r = r.slice(0, limit);
-        return r;
+      profile: userProfileView,
+      // Returns group *objects*, which is what makes the documented projections
+      // work: `user.getGroups({'group.type':'OKTA_GROUP'}).![profile.name]`.
+      // Takes one or more criteria objects, ANDed together.
+      getGroups(...criteria) {
+        const objs = criteria.filter(c => c && typeof c === 'object');
+        return objs.length ? groupsMatching(objs) : [...groupObjects];
       },
       getInternalProperty(prop) {
         const map = { id:rawUser.id, status:rawUser.status, created:rawUser.created,
@@ -660,20 +1081,19 @@
                       lastLogin:rawUser.lastLogin };
         return prop in map ? map[prop] : (rawUser[prop] ?? null);
       },
-      isMemberOf(criteria) {
-        if (!criteria || typeof criteria !== 'object') return false;
-        const name = criteria['group.profile.name'];
-        const id   = criteria['group.id'];
-        const op   = (criteria['operator'] || 'EXACT').toUpperCase();
-        if (name) {
-          return op === 'STARTS_WITH'
-            ? groups.some(g => g.startsWith(String(name)))
-            : groups.some(g => g === String(name));
-        }
-        if (id) return groupIds.includes(String(id));
-        return false;
+      isMemberOf(...criteria) {
+        const objs = criteria.filter(c => c && typeof c === 'object');
+        return objs.length > 0 && groupsMatching(objs).length > 0;
       },
-      getLinkedObject(primaryName) { return null; }, // mock
+      // Returns the profile of the user on the other side of a linked-object
+      // relationship. `manager` is Okta's one built-in primary name, and it's
+      // the only one the extension can answer for real — content.js fetches
+      // that user when the profile carries a managerId. A custom relationship
+      // ('supervisor', 'mentor', …) is a valid expression that this preview has
+      // no data for, so it answers null, the same as an unassigned appuser.
+      getLinkedObject(primaryName) {
+        return String(primaryName).toLowerCase() === 'manager' ? managerProfile : null;
+      },
     });
 
     // appuser — app-specific profile. Contains ONLY what the selected app's
@@ -697,8 +1117,6 @@
       stringContains:  (s,sub)      => s!=null && String(s).includes(String(sub)),
       startsWith:      (s,pre)      => s!=null && String(s).startsWith(String(pre)),
       removeSpaces:    (s)          => s==null?null:String(s).replace(/\s+/g,''),
-      trim:            (s)          => s==null?null:String(s).trim(),
-      toString:        (v)          => v==null?null:String(v),
       stringSwitch(input, def, ...pairs) {
         const str = String(input ?? '');
         for (let i = 0; i+1 < pairs.length; i += 2) {
@@ -708,29 +1126,72 @@
       },
     };
 
+    // ── Deprecated unqualified string functions ───────────────────
+    // Okta's reference documents these as the pre-namespace spelling and its
+    // runtime still honors them. They delegate to the namespace impls rather
+    // than re-implementing, so the two forms can't diverge; the deprecation is
+    // surfaced by the `deprecated` field on their OEL_SPECS entries, not by
+    // changing what they return.
+    const toUpperCase     = (s)     => OELString.toUpperCase(s);
+    const toLowerCase     = (s)     => OELString.toLowerCase(s);
+    const substring       = (s,a,b) => OELString.substring(s, a, b);
+    const substringBefore = (s,d)   => OELString.substringBefore(s, d);
+    const substringAfter  = (s,d)   => OELString.substringAfter(s, d);
+
     // ── Arrays namespace ──────────────────────────────────────────
+    // "CSV strings may be supplied as input to all Arrays* functions", so every
+    // entry point coerces first. Splitting on ',' and trimming matches how Okta
+    // reads a multivalued AD attribute that arrived as one delimited string.
+    const csvToArray = (a) => {
+      if (a == null) return [];
+      if (Array.isArray(a)) return a;
+      const s = String(a);
+      return s === '' ? [] : s.split(',').map(p => p.trim());
+    };
+    // Comparison is by string value: a CSV string can only ever yield strings,
+    // so `Arrays.contains('1,2,3', 1)` has to match the way Okta's does.
+    const sameElement = (x, y) => x === y || (x != null && y != null && String(x) === String(y));
     const OELArrays = {
-      add:          (a,el)   => Array.isArray(a)?[...a,el]:[el],
-      remove:       (a,el)   => Array.isArray(a)?a.filter(e=>e!==el):[],
-      get:          (a,i)    => Array.isArray(a)?(a[i]??null):null,
-      contains:     (a,el)   => Array.isArray(a)&&a.includes(el),
-      size:         (a)      => a==null?0:(Array.isArray(a)?a.length:String(a).length),
-      isEmpty:      (a)      => a==null||(Array.isArray(a)&&a.length===0),
-      toCsvString:  (a)      => Array.isArray(a)?a.join(','):'',
-      flatten:      (...as)  => as.flat(Infinity),
+      add:          (a,el)   => [...csvToArray(a), el],
+      remove:       (a,el)   => csvToArray(a).filter(e => !sameElement(e, el)),
+      get:          (a,i)    => csvToArray(a)[i] ?? null,
+      contains:     (a,el)   => csvToArray(a).some(e => sameElement(e, el)),
+      // Documented: Arrays.size(NULL) is 0.
+      size:         (a)      => a==null ? 0 : csvToArray(a).length,
+      // Documented: Arrays.isEmpty(NULL) is true.
+      isEmpty:      (a)      => a==null || csvToArray(a).length === 0,
+      // Documented in the classic Array functions table. Returns an empty array
+      // rather than mutating — nothing in OEL has reference semantics.
+      clear:        (_a)     => [],
+      toCsvString:  (a)      => csvToArray(a).join(','),
+      // Unlike the others, flatten's params are untyped, so only strings get the
+      // CSV treatment — coercing everything would turn numbers into strings.
+      flatten:      (...as)  => as.flatMap(a => typeof a === 'string' ? csvToArray(a) : a).flat(Infinity),
     };
 
     // ── Time namespace ────────────────────────────────────────────
     const OELTime = {
+      // Returns a String (not a chainable object) — that's the documented
+      // classic return type. `DateTime.now()` is the object-returning form.
       now(tz = undefined, fmt = undefined) {
-        const dt = new OELDateTime(new Date());
-        return fmt ? formatDate(dt._d, fmt) : dt._d.toISOString();
+        const zone = tz == null ? null : assertZone(tz);
+        const d = new Date();
+        if (fmt)  return formatDate(d, fmt, zone);
+        if (zone) return formatDate(d, DEFAULT_DATE_FORMAT, zone);
+        return d.toISOString();
       },
       fromUnixToIso8601:    (s) => s==null?null:OELDateTime.fromUnix(s).toString(),
       fromIso8601ToUnix:    (s) => s==null?null:OELDateTime.fromIso(s).toUnix(),
       fromWindowsToIso8601: (s) => s==null?null:OELDateTime.fromWindows(s).toString(),
       fromIso8601ToWindows: (s) => s==null?null:OELDateTime.fromIso(s).toWindows(),
-      fromStringToIso8601:  (s) => { try { return s==null?null:new Date(String(s)).toISOString(); } catch { return null; } },
+      // `format` describes how to READ `time`, per the docs. Without it the old
+      // one-arg version fell through to Date's loose parsing, so a non-ISO input
+      // like '01/02/2024' silently came back as the wrong day.
+      fromStringToIso8601:  (s, fmt) => {
+        if (s == null) return null;
+        const dt = parseWithFormat(s, fmt);
+        return dt ? dt.toString() : null;
+      },
       fromIso8601ToString:  (s,fmt) => s==null?null:formatDate(new Date(String(s)), fmt),
     };
 
@@ -738,27 +1199,11 @@
     const OELConvert = {
       toInt:    (v) => { if(v==null)return null; const n=parseInt(String(v),10); return isNaN(n)?null:n; },
       toNum:    (v) => { if(v==null)return null; const n=parseFloat(String(v));   return isNaN(n)?null:n; },
-      toString: (v) => v==null?null:String(v),
     };
 
     // ── Iso3166Convert namespace ──────────────────────────────────
-    const COUNTRY_DATA = {
-      'US':{'alpha2':'US','alpha3':'USA','numeric':'840','name':'United States'},
-      'GB':{'alpha2':'GB','alpha3':'GBR','numeric':'826','name':'United Kingdom'},
-      'CA':{'alpha2':'CA','alpha3':'CAN','numeric':'124','name':'Canada'},
-      'DE':{'alpha2':'DE','alpha3':'DEU','numeric':'276','name':'Germany'},
-      'FR':{'alpha2':'FR','alpha3':'FRA','numeric':'250','name':'France'},
-      'AU':{'alpha2':'AU','alpha3':'AUS','numeric':'036','name':'Australia'},
-      'JP':{'alpha2':'JP','alpha3':'JPN','numeric':'392','name':'Japan'},
-      'IN':{'alpha2':'IN','alpha3':'IND','numeric':'356','name':'India'},
-      'United States':{'alpha2':'US','alpha3':'USA','numeric':'840','name':'United States'},
-      'United Kingdom':{'alpha2':'GB','alpha3':'GBR','numeric':'826','name':'United Kingdom'},
-    };
-    const resolveCountry = (v) => {
-      if (!v) return null;
-      const k = String(v).toUpperCase();
-      return COUNTRY_DATA[k] || COUNTRY_DATA[String(v)] || null;
-    };
+    // COUNTRY_DATA / resolveCountry live at module scope so `.parseCountryCode()`
+    // shares this one table.
     const Iso3166Convert = {
       toAlpha2:  (v) => resolveCountry(v)?.alpha2  ?? null,
       toAlpha3:  (v) => resolveCountry(v)?.alpha3  ?? null,
@@ -773,9 +1218,28 @@
     const isMemberOfGroupNameStartsWith = (pre) => groups.some(g => g.startsWith(String(pre)));
     const isMemberOfGroupNameContains   = (sub) => groups.some(g => g.includes(String(sub)));
     const isMemberOfGroupNameRegex      = (re)  => groups.some(g => new RegExp(String(re)).test(g));
-    const getFilteredGroups             = (wl, _cond = undefined, limit = undefined) => {
-      let r = Array.isArray(wl) ? groups.filter(g => wl.includes(g)) : [...groups];
-      return typeof limit==='number' ? r.slice(0, limit) : r;
+    // getFilteredGroups({allow list}, group_expression, limit). All three are
+    // required by Okta's runtime — same precedent as Groups.* and its `limit`.
+    // The allow list holds group *IDs* (the docs' example passes `00g…` values);
+    // group_expression names the field to emit per matched group, e.g.
+    // 'group.name' or 'group.id'.
+    const GROUP_EXPRESSION_FIELDS = {
+      'group.id':          (g) => g.id,
+      'group.name':        (g) => g.profile && g.profile.name,
+      'group.description': (g) => g.profile && g.profile.description,
+    };
+    const getFilteredGroups = (wl, expr, limit) => {
+      const allow = Array.isArray(wl) ? wl.map(String) : [String(wl)];
+      const read  = own(GROUP_EXPRESSION_FIELDS, String(expr));
+      if (!read) {
+        throw new Error(`getFilteredGroups: unsupported group_expression '${expr}' — expected one of `
+          + Object.keys(GROUP_EXPRESSION_FIELDS).join(', '));
+      }
+      return groupObjects
+        .filter(g => allow.includes(String(g.id)))
+        .map(read)
+        .filter(v => v != null)
+        .slice(0, limit);
     };
 
     // Legacy Groups.* API. All three params required per Okta docs — no JS
@@ -842,6 +1306,7 @@
 
     return {
       user, appuser, idpuser, app, access, org, groups, groupIds, session, security, device,
+      login, accessRequest,
       client, oauth_request, context,
       String:  OELString,
       Arrays:  OELArrays,
@@ -855,6 +1320,7 @@
       getFilteredGroups,
       getManagerUser, getManagerAppUser, getAssistantUser, getAssistantAppUser,
       hasDirectoryUser, findDirectoryUser, hasWorkdayUser, findWorkdayUser,
+      toUpperCase, toLowerCase, substring, substringBefore, substringAfter,
       ...namedApps,
     };
   }
@@ -866,16 +1332,23 @@
   class OELEvaluator {
     constructor(profile) { this.profile = profile; }
 
+    // Returns { success, result, error, deprecations }. `deprecations` is an
+    // array of notes about deprecated-but-documented constructs the expression
+    // uses — always present so callers can render it without a guard. It stays
+    // empty on a parse failure: there's no AST to read, and the error is the
+    // more useful thing to show.
     evaluate(expression, profile) {
-      if (!expression?.trim()) return { success:false, result:null, error:null };
+      if (!expression?.trim()) return { success:false, result:null, error:null, deprecations:[] };
       const p = profile || this.profile;
+      let deprecations = [];
       try {
         const tokens = new Lexer(expression.trim()).tokenize();
         const ast    = new Parser(tokens).parse();
+        deprecations = [...collectDeprecations(ast)];
         const result = new Interpreter(buildContext(p)).eval(ast);
-        return { success:true, result, error:null };
+        return { success:true, result, error:null, deprecations };
       } catch (err) {
-        return { success:false, result:null, error:err.message };
+        return { success:false, result:null, error:err.message, deprecations };
       }
     }
   }
