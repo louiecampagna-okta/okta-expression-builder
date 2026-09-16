@@ -25,7 +25,9 @@
       label: 'Profile Mapping',
       desc: 'Profile editor — map attributes between Okta user profile and an app profile',
       vars: ['user', 'appuser', 'org'],
-      restrictions: [],
+      restrictions: [
+        { pattern: /\bGroups\./, msg: 'Groups.* functions only work in group-claim expressions on an authorization server — they cannot be used in a property mapping' },
+      ],
     },
     {
       id: 'idp_attr_mapping',
@@ -34,6 +36,7 @@
       vars: ['user', 'idpuser', 'org'],
       restrictions: [
         { pattern: /\bappuser\./, msg: 'appuser is not available in IdP attribute mapping — use idpuser to reference incoming IdP attributes' },
+        { pattern: /\bGroups\./,  msg: 'Groups.* functions only work in group-claim expressions on an authorization server — they cannot be used in an attribute mapping' },
       ],
     },
     {
@@ -41,11 +44,22 @@
       label: 'Group Rules',
       desc: 'Dynamic group membership criteria',
       vars: ['user'],
+      // Group rules accept only String.*, Arrays.*, and user expressions.
+      // Everything below is documented as rejected — Okta's own example of an
+      // invalid rule is `Convert.toInt("2018") == user.yearJoined`.
       restrictions: [
-        { pattern: /\bTime\./,    msg: 'Time functions are not available in Group Rules' },
-        { pattern: /\bConvert\./, msg: 'Convert functions are not available in Group Rules' },
+        { pattern: /\bTime\./,    msg: 'Time functions are not available in Group Rules — only String, Arrays, and user expressions are permitted' },
+        { pattern: /\bConvert\./, msg: 'Convert functions are not available in Group Rules — only String, Arrays, and user expressions are permitted. Compare as strings instead of converting' },
+        { pattern: /\bIso3166Convert\./, msg: 'Iso3166Convert functions are not available in Group Rules — only String, Arrays, and user expressions are permitted' },
+        { pattern: /\bGroups\./,  msg: 'Groups.* functions only work in group-claim expressions on an authorization server — they cannot be used in a group rule' },
         { pattern: /\bappuser\./, msg: 'appuser is not available in Group Rules' },
         { pattern: /\bidpuser\./, msg: 'idpuser is not available in Group Rules' },
+        { pattern: /\bdevice\.|\bsession\.|\bsecurity\.|\blogin\./,
+          msg: 'Sign-in runtime signals (device, session, security, login) are not available in Group Rules — group membership is evaluated outside a sign-in' },
+        // Not an error — the docs recommend the function form for group rules
+        // rather than forbidding the attribute.
+        { pattern: /\buser\.status\b(?!\s*\.)/,
+          msg: 'Prefer user.getInternalProperty("status") in Group Rules — Okta documents that form for rule conditions' },
         { pattern: /getManager|getAssistant|findDirectory|hasDirectory|findWorkday|hasWorkday/,
           msg: 'Manager and Directory functions are not available in Group Rules' },
       ],
@@ -57,6 +71,15 @@
       vars: ['user', 'appuser', 'org', 'app', 'access'],
       restrictions: [
         { fn: (e) => e.length > 1024, msg: 'Expression exceeds the 1024-character limit for OAuth claims' },
+        // "Explicit references to apps aren't supported for OAuth 2.0/OIDC
+        // custom claims." That's about naming an app *instance*
+        // (`active_directory.sAMAccountName`); the generic `app.*` binding is
+        // documented as usable here, so it's deliberately not flagged. The
+        // named-app roots come from the profile so this stays accurate as more
+        // are added.
+        { fn: (e) => Object.keys((state.profile && state.profile.apps) || {})
+                       .some(k => new RegExp(`\\b${k}\\.`).test(e)),
+          msg: 'Explicit references to a named app instance are not supported in OAuth/OIDC custom claims — the claim is evaluated for whichever client requested the token. Use appuser.* or client.*' },
       ],
     },
     {
@@ -64,13 +87,23 @@
       label: 'SAML Attribute Statements',
       desc: 'Customize SAML response attribute values for an application',
       vars: ['user', 'appuser', 'org'],
-      restrictions: [],
+      restrictions: [
+        // `access.*` and `app.*` are OAuth/OIDC claim bindings; the docs state
+        // those expressions don't work for SAML 2.0 apps. They resolve to null
+        // rather than erroring, which is exactly why they need flagging.
+        { pattern: /\baccess\./,
+          msg: "access.* is an OAuth 2.0 binding and doesn't work for SAML apps — scopes do not exist in a SAML assertion flow" },
+        { pattern: /\bapp\./,
+          msg: "app.* claim expressions don't work for SAML 2.0 apps — reference the user or appuser profile instead" },
+        { pattern: /\bGroups\./,
+          msg: 'Groups.* functions only work in group-claim expressions on an authorization server — for SAML group attributes use isMemberOfGroupName / getFilteredGroups' },
+      ],
     },
     {
       id: 'app_sign_on',
       label: 'App Sign-On Policy',
       desc: 'Authentication and authorization policy conditions (Identity Engine)',
-      vars: ['user', 'device', 'security', 'session'],
+      vars: ['user', 'device', 'security', 'session', 'login'],
       restrictions: [
         { pattern: /\buser\.status\b(?!\s*\.)/, msg: 'Use user.getInternalProperty("status") — direct user.status access is not supported in policy expressions' },
       ],
@@ -86,56 +119,160 @@
       id: 'access_cert',
       label: 'Access Certification',
       desc: 'Identity Governance — user eligibility rules for certification campaigns',
-      vars: ['user', 'org'],
+      vars: ['user', 'org', 'appuser', 'accessRequest'],
       restrictions: [],
     },
   ];
 
+  // ── Identity Engine runtime signals ───────────────────────────
+  // device.*, session.*, security.*, and login.* are populated by Okta during a
+  // real sign-in. Nothing in the API can return them, so they're mocked — but
+  // mocked across the whole documented surface, because a policy expression that
+  // reads `device.profile.diskEncryptionType` needs *something* there or it
+  // silently evaluates to null and the author can't tell a typo from a
+  // legitimately-absent signal.
+  //
+  // A managed, registered, healthy corporate Mac. The six POLICY_PRESETS below
+  // are deltas over this base rather than standalone objects: a preset only
+  // differs in a handful of signals, and duplicating thirty fields six times is
+  // how they'd drift apart.
+  const BASE_DEVICE = {
+    id: 'guo4a5u7JHHhjXrEK0g4',
+    // Screen-lock strength as assessed by Okta Verify: NONE, PASSCODE, BIOMETRIC.
+    assurance: { screenLockType: 'BIOMETRIC' },
+    // Device-bound credential the caller presented, used by Device Access rules.
+    caller: {
+      binaryIdentifier:  'com.okta.mobile',
+      bindingType:       'DEVICE_BOUND',
+      validationStatus:  'VALID',
+    },
+    profile: {
+      displayName:   "Jane's MacBook Pro",
+      manufacturer:  'Apple',
+      model:         'MacBookPro18,3',
+      serialNumber:  'C02XY1ZZ4J8N',
+      udid:          'D1F2A3B4-C5D6-7E8F-9A0B-1C2D3E4F5A6B',
+      // Windows-only identifiers; null on a Mac, which is the point — the
+      // documented binding exists but the platform doesn't populate it.
+      sid:               null,
+      tpmPublicKeyHash:  null,
+      // Mobile-only identifiers, likewise null here.
+      imei: null, meid: null,
+      osVersion:          '14.5.1',
+      platform:           'MACOS',      // IOS, ANDROID, WINDOWS, MACOS, CHROMEOS
+      diskEncryptionType: 'FULL',       // NONE, USER, FULL, ALL_INTERNAL_VOLUMES, SYSTEM_VOLUME
+      managed:               true,
+      registered:            true,
+      secureHardwarePresent: true,
+      // Android/iOS integrity signals. All false on a healthy device; each one
+      // turning true is a distinct tampering indicator.
+      integrityDebug:      false,
+      integrityEmulator:   false,
+      integrityHook:       false,
+      integrityJailbreak:  false,
+      integrityRepackage:  false,
+    },
+    // Signals contributed by device-integration partners.
+    provider: {
+      oktaVerify:   { version: '9.24.0' },
+      // Windows Security Center.
+      wsc:          { fireWall: 'ON', autoUpdateSettings: 'ON' },
+      // Zero Trust Assessment score from a partner (e.g. CrowdStrike), 0–100.
+      zta:          { overall: 92 },
+      // Okta Device Access — whether the desktop is joined to management.
+      deviceAccess: { joined: true },
+    },
+  };
+
+  const BASE_SESSION  = { id: '102X_bLDdgQTM6O0iBqCLDPFA', amr: ['pwd', 'mfa'] };
+  // `behaviors` lists the behavior-detection rules that fired on this sign-in.
+  // An array so `Arrays.contains(security.behaviors, 'New IP')` works.
+  const BASE_SECURITY = { risk: { level: 'LOW' }, behaviors: [] };
+  // What the user actually typed at the sign-in widget, before Okta resolves it
+  // to a user — so it can differ from user.login (an alias, or a phone number).
+  const BASE_LOGIN    = { identifier: 'jane.doe@acme.com' };
+
+  // Deep-merges one level of nesting, which is all these signal objects have.
+  // Object.assign would replace `profile` wholesale and drop the other 20 fields.
+  function mergeSignals(base, delta) {
+    const out = { ...base };
+    for (const [k, v] of Object.entries(delta || {})) {
+      out[k] = (v && typeof v === 'object' && !Array.isArray(v) && base[k])
+        ? mergeSignals(base[k], v)
+        : v;
+    }
+    return out;
+  }
+
   // ── Policy presets ────────────────────────────────────────────
-  // Preset combinations for App Sign-On Policy expressions that reference
-  // device.*, session.amr, and security.risk.*. These are runtime signals
-  // Okta populates during a real sign-in — there's no way to fetch them
-  // from an API, so we ship a small set of realistic combinations.
+  // Preset combinations for App Sign-On Policy expressions. Each lists only the
+  // signals that distinguish it; everything else comes from the bases above.
   const POLICY_PRESETS = [
     {
       id: 'managed-mfa-low',
       label: 'Managed corp device · pwd+MFA · low risk',
-      device:   { profile: { managed: true,  registered: true,  platform: 'MACOS' } },
+      device:   {},
       session:  { amr: ['pwd', 'mfa'] },
       security: { risk: { level: 'LOW' } },
     },
     {
       id: 'unmanaged-pwd-low',
       label: 'Unmanaged personal device · pwd only · low risk',
-      device:   { profile: { managed: false, registered: false, platform: 'IOS' } },
+      device:   { profile: { managed: false, registered: false, platform: 'IOS',
+                             displayName: "Jane's iPhone", manufacturer: 'Apple',
+                             model: 'iPhone15,2', osVersion: '17.5.1',
+                             serialNumber: null, secureHardwarePresent: false,
+                             diskEncryptionType: 'NONE' },
+                  assurance: { screenLockType: 'PASSCODE' },
+                  provider: { deviceAccess: { joined: false }, zta: { overall: 41 } } },
       session:  { amr: ['pwd'] },
       security: { risk: { level: 'LOW' } },
     },
     {
       id: 'managed-webauthn-low',
       label: 'Managed corp device · pwd+WebAuthn · low risk',
-      device:   { profile: { managed: true,  registered: true,  platform: 'WINDOWS' } },
+      device:   { profile: { platform: 'WINDOWS', displayName: 'ACME-W11-0421',
+                             manufacturer: 'Dell', model: 'Latitude 7440',
+                             osVersion: '10.0.22631', sid: 'S-1-5-21-1004336348-1177238915-682003330-512',
+                             tpmPublicKeyHash: 'x9Kq2vLm8fT4wR1s', udid: null } },
       session:  { amr: ['pwd', 'hwk'] },
       security: { risk: { level: 'LOW' } },
     },
     {
       id: 'registered-mfa-medium',
       label: 'Registered BYOD · pwd+MFA · medium risk',
-      device:   { profile: { managed: false, registered: true,  platform: 'ANDROID' } },
+      device:   { profile: { managed: false, registered: true, platform: 'ANDROID',
+                             displayName: 'Pixel 8', manufacturer: 'Google',
+                             model: 'Pixel 8', osVersion: '14', udid: null,
+                             imei: '350000000000001', meid: null,
+                             diskEncryptionType: 'USER' },
+                  provider: { zta: { overall: 68 }, deviceAccess: { joined: false } } },
       session:  { amr: ['pwd', 'mfa'] },
-      security: { risk: { level: 'MEDIUM' } },
+      security: { risk: { level: 'MEDIUM' }, behaviors: ['New Device'] },
     },
     {
       id: 'unmanaged-pwd-high',
       label: 'Unmanaged device · pwd only · high risk',
-      device:   { profile: { managed: false, registered: false, platform: 'IOS' } },
+      device:   { profile: { managed: false, registered: false, platform: 'IOS',
+                             displayName: null, serialNumber: null, udid: null,
+                             osVersion: '16.3', secureHardwarePresent: false,
+                             diskEncryptionType: 'NONE',
+                             // Jailbroken — the signal a high-risk rule exists for.
+                             integrityJailbreak: true },
+                  assurance: { screenLockType: 'NONE' },
+                  caller: { validationStatus: 'INVALID' },
+                  provider: { zta: { overall: 12 }, deviceAccess: { joined: false } } },
       session:  { amr: ['pwd'] },
-      security: { risk: { level: 'HIGH' } },
+      security: { risk: { level: 'HIGH' },
+                  behaviors: ['New IP', 'New Country', 'Velocity'] },
     },
     {
       id: 'kerberos-managed-low',
       label: 'Managed device · Kerberos SSO · low risk',
-      device:   { profile: { managed: true,  registered: true,  platform: 'WINDOWS' } },
+      device:   { profile: { platform: 'WINDOWS', displayName: 'ACME-W11-0099',
+                             manufacturer: 'Lenovo', model: 'ThinkPad X1',
+                             osVersion: '10.0.22631', sid: 'S-1-5-21-1004336348-1177238915-682003330-513',
+                             tpmPublicKeyHash: 'p3Rt7yUi1oPa5sDf', udid: null } },
       session:  { amr: ['kba'] },
       security: { risk: { level: 'LOW' } },
     },
@@ -151,9 +288,9 @@
     const p = POLICY_PRESETS.find(x => x.id === id) || POLICY_PRESETS[0];
     state.profile = {
       ...state.profile,
-      device:   p.device,
-      session:  p.session,
-      security: p.security,
+      device:   mergeSignals(BASE_DEVICE,   p.device),
+      session:  mergeSignals(BASE_SESSION,  p.session),
+      security: mergeSignals(BASE_SECURITY, p.security),
     };
     state.evaluator = new OELEvaluator(state.profile);
     refreshChips();
@@ -171,7 +308,9 @@
       title: 'Senior Engineer',  userType: 'Employee',
       organization: 'Acme Corp', division: 'Technology',
       department: 'Engineering', costCenter: 'ENG-001',
-      employeeNumber: 'EMP42',
+      // Numeric so the documented Convert.toInt / .toInteger examples return a
+      // value instead of the null a non-numeric string correctly produces.
+      employeeNumber: '100042',
       mobilePhone: '+1-555-0100', primaryPhone: '+1-555-0200',
       streetAddress: '123 Main St', city: 'San Francisco',
       state: 'CA', zipCode: '94105', countryCode: 'US',
@@ -188,7 +327,10 @@
       managerEmail: 'bob.smith@acme.com',
       // Common custom / AD-mapped
       samAccountName: 'jdoe', workerType: 'Employee',
-      hireDate: '2021-06-15', jobCode: 'SWE-SR', jobLevel: 'L4',
+      // Deliberately NOT ISO: hireDate stands in for an HR-system-sourced string,
+      // which is the whole reason Time.fromStringToIso8601 takes a format. With an
+      // ISO value here the documented 'MM/dd/yyyy' example parses to null.
+      hireDate: '06/15/2021', jobCode: 'SWE-SR', jobLevel: 'L4',
       pwdLastSet: '133520736000000000',
     },
     appuser: {
@@ -210,6 +352,15 @@
       employeeID: 'EMP42', employeeType: 'FTE',
       accountEnabled: true,
       extensionAttribute1: 'EXT001', extensionAttribute2: null,
+      // Governance entitlement values for this app assignment, addressed by
+      // attribute name (`appuser.entitlements.role`). Multi-value entitlements
+      // arrive as arrays, single-value as scalars — both shapes appear here so
+      // Arrays.* against an entitlement can be tried out.
+      entitlements: {
+        role:       'Contributor',
+        licenses:   ['Professional', 'Analytics Add-on'],
+        costCenter: 'ENG-001',
+      },
     },
     apps: {
       active_directory: {
@@ -226,9 +377,37 @@
     },
     groups:   ['Engineering', 'All Employees', 'US Employees', 'Okta Users', 'VPN Access'],
     groupIds: ['00g1','00g2','00g3','00g4','00g5'],
-    session:  { amr: ['pwd', 'mfa'] },
-    security: { risk: { level: 'LOW' } },
-    device:   { profile: { managed: true, registered: true } },
+    // Group records for the mock user, matching what toGroupObject() produces
+    // from the real /groups fetch. `user.getGroups()` criteria read group.type
+    // and group.source.id, so the mock needs a mix: BUILT_IN for Okta's own
+    // "Everyone"-style groups and APP_GROUP for a directory-sourced one, or the
+    // documented criteria examples would all match everything.
+    groupObjects: [
+      { id:'00g1', type:'OKTA_GROUP', created:'2023-01-15T00:00:00.000Z', lastUpdated:'2023-01-15T00:00:00.000Z',
+        lastMembershipUpdated:'2024-06-01T00:00:00.000Z', profile:{ name:'Engineering',    description:'Engineering department' } },
+      { id:'00g2', type:'BUILT_IN',   created:'2022-03-01T00:00:00.000Z', lastUpdated:'2022-03-01T00:00:00.000Z',
+        lastMembershipUpdated:'2024-06-01T00:00:00.000Z', profile:{ name:'All Employees',  description:'Everyone in the org' } },
+      { id:'00g3', type:'OKTA_GROUP', created:'2023-02-01T00:00:00.000Z', lastUpdated:'2023-02-01T00:00:00.000Z',
+        lastMembershipUpdated:'2024-05-01T00:00:00.000Z', profile:{ name:'US Employees',   description:'US-based staff' } },
+      { id:'00g4', type:'APP_GROUP',  created:'2023-04-10T00:00:00.000Z', lastUpdated:'2023-04-10T00:00:00.000Z',
+        lastMembershipUpdated:'2024-04-10T00:00:00.000Z', profile:{ name:'Okta Users',     description:'Synced from AD' },
+        source:{ id:'0oaadinstance01' } },
+      { id:'00g5', type:'OKTA_GROUP', created:'2023-06-20T00:00:00.000Z', lastUpdated:'2023-06-20T00:00:00.000Z',
+        lastMembershipUpdated:'2024-03-15T00:00:00.000Z', profile:{ name:'VPN Access',     description:'VPN entitlement' } },
+    ],
+    session:  BASE_SESSION,
+    security: BASE_SECURITY,
+    device:   BASE_DEVICE,
+    login:    BASE_LOGIN,
+
+    // Identity Governance access-request bindings, used in Access Certification
+    // eligibility rules. `operation` is the request being evaluated; the
+    // authenticator block identifies which authenticator it concerns.
+    accessRequest: {
+      operation:     'GRANT',
+      authenticator: { id: 'aut1a2b3c4d5e6f7g8h9', key: 'okta_verify' },
+      metadata:      { type: 'APP_ACCESS' },
+    },
 
     // idpuser — attributes from an external Identity Provider (SAML or OIDC IdP).
     // Available in IdP Attribute Mapping rules; represents the incoming IdP assertion.
@@ -276,7 +455,7 @@
         { sig:'String.join(sep, str1, str2, ...)',            desc:'Joins strings with a separator.',                                         ex:"String.join('.', user.firstName, user.lastName)" },
         { sig:'String.toUpperCase(str)',                      desc:'Converts to uppercase.',                                                   ex:"String.toUpperCase(user.department)" },
         { sig:'String.toLowerCase(str)',                      desc:'Converts to lowercase.',                                                   ex:"String.toLowerCase(user.email)" },
-        { sig:'String.substring(str, start[, end])',          desc:'Extracts a substring by index (0-based, end exclusive).',                 ex:"String.substring(user.firstName, 0, 1)" },
+        { sig:'String.substring(input, startIndex, endIndex)', desc:'Extracts a substring by index (0-based, end exclusive). All three arguments are required in the namespace form; the method form value.substring(start) accepts one.', ex:"String.substring(user.firstName, 0, 1)" },
         { sig:'String.substringBefore(str, delimiter)',       desc:'Returns the part of str before the first delimiter.',                      ex:"String.substringBefore(user.email, '@')" },
         { sig:'String.substringAfter(str, delimiter)',        desc:'Returns the part of str after the first delimiter.',                       ex:"String.substringAfter(user.email, '@')" },
         { sig:'String.replace(str, pattern, replacement)',    desc:'Replaces all regex matches (global).',                                     ex:"String.replace(user.displayName, '\\\\s+', '.')" },
@@ -284,9 +463,7 @@
         { sig:'String.stringContains(str, substring)',        desc:'True if str contains the substring.',                                      ex:"String.stringContains(user.email, 'acme.com')" },
         { sig:'String.startsWith(str, prefix)',               desc:'True if str starts with prefix.',                                          ex:"String.startsWith(user.userType, 'Emp')" },
         { sig:'String.removeSpaces(str)',                     desc:'Removes all whitespace characters.',                                        ex:"String.removeSpaces(user.displayName)" },
-        { sig:'String.trim(str)',                             desc:'Strips leading and trailing whitespace.',                                    ex:"String.trim(user.firstName)" },
         { sig:'String.stringSwitch(input, default, k1, v1, ...)',desc:'Returns v1 if input==k1, else next pair, else default.',               ex:"String.stringSwitch(user.department,'Other','Engineering','dev')" },
-        { sig:'String.toString(value)',                       desc:'Converts any value to its string representation.',                          ex:"String.toString(user.employeeNumber)" },
         { sig:'value.toUpperCase()',                          desc:'Identity Engine method style — same as String.toUpperCase.',               ex:"user.department.toUpperCase()" },
         { sig:'value.toLowerCase()',                          desc:'Identity Engine method style — same as String.toLowerCase.',               ex:"user.firstName.toLowerCase()" },
         { sig:'value.substringBefore(delimiter)',             desc:'Identity Engine method style — same as String.substringBefore.',           ex:"user.email.substringBefore('@')" },
@@ -296,12 +473,13 @@
     {
       ns: 'Arrays', color: '#00853b',
       fns: [
-        { sig:'Arrays.contains(array, element)',       desc:'True if array contains element.',                         ex:"Arrays.contains(groups, 'Engineering')" },
+        { sig:'Arrays.contains(array, element)',       desc:'True if array contains element. Every Arrays.* function also accepts a comma-separated string wherever an array is expected.', ex:"Arrays.contains(groups, 'Engineering')" },
         { sig:'Arrays.size(array)',                    desc:'Number of elements.',                                      ex:"Arrays.size(groups)" },
         { sig:'Arrays.isEmpty(array)',                 desc:'True if array is null or empty.',                          ex:"Arrays.isEmpty(groups)" },
         { sig:'Arrays.add(array, element)',            desc:'Returns new array with element appended.',                 ex:"Arrays.add(groups, 'NewGroup')" },
         { sig:'Arrays.remove(array, element)',         desc:'Returns new array with element removed.',                  ex:"Arrays.remove(groups, 'Engineering')" },
         { sig:'Arrays.get(array, index)',              desc:'Returns element at index (0-based).',                      ex:"Arrays.get(groups, 0)" },
+        { sig:'Arrays.clear(array)',                   desc:'Returns an empty array.',                                  ex:"Arrays.clear(groups)" },
         { sig:'Arrays.toCsvString(array)',             desc:'Converts array to a comma-separated string.',              ex:"Arrays.toCsvString(groups)" },
         { sig:'Arrays.flatten(...values)',             desc:'Flattens nested arrays into one flat array.',              ex:"Arrays.flatten([[1,2],[3,4]])" },
         { sig:'collection.![expression]',             desc:'SpEL projection — maps each element and returns a new array.\nExample: user.getGroups().![profile.name]', ex:"user.getGroups().![profile.name]" },
@@ -315,12 +493,15 @@
         { sig:'Time.fromIso8601ToUnix(iso)',           desc:'Converts ISO 8601 string to Unix epoch seconds.',         ex:"Time.fromIso8601ToUnix(user.passwordChanged)" },
         { sig:'Time.fromWindowsToIso8601(filetime)',   desc:'Converts Windows FILETIME (AD pwdLastSet) to ISO 8601.', ex:"Time.fromWindowsToIso8601(user.pwdLastSet)" },
         { sig:'Time.fromIso8601ToWindows(iso)',        desc:'Converts ISO 8601 to Windows FILETIME.',                  ex:"Time.fromIso8601ToWindows(user.lastLogin)" },
-        { sig:'Time.fromStringToIso8601(string)',      desc:'Parses a human-readable date string to ISO 8601.',        ex:"Time.fromStringToIso8601(user.hireDate)" },
+        { sig:'Time.fromStringToIso8601(time, format)', desc:'Parses a date string to ISO 8601. The format describes how to read the input (Joda-style: yyyy, MM, dd, HH, mm, ss, SSS) and is required.', ex:"Time.fromStringToIso8601(user.hireDate, 'MM/dd/yyyy')" },
         { sig:'Time.fromIso8601ToString(iso, format)', desc:'Formats an ISO 8601 string with a custom format.',        ex:"Time.fromIso8601ToString(user.lastLogin, 'YYYY-MM-dd')" },
         { sig:'DateTime.now()',                        desc:'Identity Engine — returns a ZonedDateTime object for method chaining.', ex:"DateTime.now().toString('YYYY-MM-dd')" },
         { sig:'dateValue.withinDays(n)',               desc:'Identity Engine — true if the date is within n days of now.', ex:"user.created.parseStringTime().withinDays(30)" },
         { sig:'dateValue.plusDays(n)',                 desc:'Identity Engine — returns a new datetime n days in the future.', ex:"user.created.parseStringTime().plusDays(90).toString()" },
-        { sig:'dateValue.parseStringTime()',           desc:'Identity Engine — parses an ISO string to a ZonedDateTime.', ex:"user.created.parseStringTime().withinDays(90)" },
+        { sig:'dateValue.parseStringTime([format])',    desc:'Identity Engine — parses a date string to a ZonedDateTime. Reads ISO 8601 with no argument, or a Joda pattern when given one.', ex:"user.created.parseStringTime().withinDays(90)" },
+        { sig:'value.parseUnixTime()',                 desc:'Identity Engine — parses Unix epoch seconds to a ZonedDateTime.', ex:"user.lastLogin.parseStringTime().toUnix().parseUnixTime().toString()" },
+        { sig:'value.parseWindowsTime()',              desc:'Identity Engine — parses a Windows FILETIME (AD pwdLastSet) to a ZonedDateTime.', ex:"user.pwdLastSet.parseWindowsTime().withinDays(90)" },
+        { sig:'dateValue.toZone(zoneId)',              desc:'Identity Engine — reads the same instant in another IANA time zone, e.g. Asia/Tokyo.', ex:"DateTime.now().toZone('Asia/Tokyo').toString('yyyy-MM-dd HH:mm')" },
       ],
     },
     {
@@ -328,7 +509,8 @@
       fns: [
         { sig:'Convert.toInt(value)',   desc:'Converts to integer.',       ex:"Convert.toInt(user.employeeNumber)" },
         { sig:'Convert.toNum(value)',   desc:'Converts to decimal number.', ex:"Convert.toNum('3.14')" },
-        { sig:'Convert.toString(value)',desc:'Converts to string.',         ex:"Convert.toString(user.id)" },
+        { sig:'value.toInteger()',      desc:'Identity Engine method style — converts to integer.',        ex:"user.employeeNumber.toInteger()" },
+        { sig:'value.toNumber()',       desc:'Identity Engine method style — converts to decimal number.', ex:"user.employeeNumber.toNumber()" },
       ],
     },
     {
@@ -338,6 +520,14 @@
         { sig:'Iso3166Convert.toAlpha3(value)',  desc:'Converts to 3-letter ISO code (e.g. "USA").',                    ex:"Iso3166Convert.toAlpha3(user.countryCode)" },
         { sig:'Iso3166Convert.toNumeric(value)', desc:'Converts to numeric ISO code (e.g. "840").',                     ex:"Iso3166Convert.toNumeric('US')" },
         { sig:'Iso3166Convert.toName(value)',    desc:'Converts to country name (e.g. "United States").',               ex:"Iso3166Convert.toName(user.countryCode)" },
+        { sig:'value.parseCountryCode()',        desc:'Identity Engine method style — returns a CountryCode object. Chain .toAlpha2(), .toAlpha3(), .toNumeric(), or .toName() off it.', ex:"user.countryCode.parseCountryCode().toName()" },
+      ],
+    },
+    {
+      ns: 'Version', color: '#0a7f6d',
+      fns: [
+        { sig:'value.versionGreaterThan(other)', desc:'Identity Engine — compares two version strings segment by segment. Use these instead of < / > on a version, which compares lexically and reports 14.10 as older than 14.9.', ex:"device.profile.osVersion.versionGreaterThan('14.0')" },
+        { sig:'value.versionLessThan(other)',    desc:'Identity Engine — true when the version is older than other. Missing segments count as zero, so 14 equals 14.0.0.', ex:"device.provider.oktaVerify.version.versionLessThan('5.0.0')" },
       ],
     },
     {
@@ -349,12 +539,13 @@
         { sig:'isMemberOfGroupNameStartsWith(prefix)',        desc:'True if user is in a group whose name starts with prefix.', ex:"isMemberOfGroupNameStartsWith('IT_')" },
         { sig:'isMemberOfGroupNameContains(substring)',       desc:'True if user is in a group whose name contains substring.', ex:"isMemberOfGroupNameContains('Admin')" },
         { sig:'isMemberOfGroupNameRegex(regex)',              desc:'True if user is in a group whose name matches the regex.', ex:"isMemberOfGroupNameRegex('^IT.*Users$')" },
-        { sig:'getFilteredGroups(allowList, expression, limit)', desc:'Returns groups from the allowList that the user belongs to.', ex:"getFilteredGroups(['00g1','00g2'], 'group.name', 10)" },
-        { sig:"user.getGroups({'group.type': {'OKTA_GROUP'}})", desc:"Returns user's groups matching a criteria map.", ex:"user.getGroups({'group.type': {'OKTA_GROUP'}})" },
-        { sig:"user.isMemberOf({'group.profile.name': 'name', 'operator': 'EXACT'})", desc:'Identity Engine — checks membership with a criteria object. Operators: EXACT, STARTS_WITH.', ex:"user.isMemberOf({'group.profile.name': 'Engineering'})" },
+        { sig:'getFilteredGroups(allowList, group_expression, limit)', desc:"Returns a field from each group in the allowList (a list of group IDs) that the user belongs to. group_expression is one of group.id, group.name, group.description. All three arguments are required.", ex:"getFilteredGroups({'00g1','00g2'}, 'group.name', 10)" },
+        { sig:"user.getGroups(criteria[, ...])", desc:"Returns the user's matching groups as group objects, so projections work. Criteria keys: group.id, group.type, group.source.id, group.profile.name. A list value matches any of its entries (OR); extra criteria objects must all match (AND). Readable per group: id, type, created, lastUpdated, lastMembershipUpdated, profile.name, profile.description.", ex:"user.getGroups({'group.type': {'OKTA_GROUP'}}).![profile.name]" },
+        { sig:"user.isMemberOf(criteria[, ...])", desc:"Identity Engine — checks membership with a criteria object. Same keys as getGroups. 'operator' applies only to group.profile.name and defaults to STARTS_WITH; the other option is EXACT.", ex:"user.isMemberOf({'group.profile.name': 'Engineering'})" },
         { sig:'user.getInternalProperty(name)',               desc:"Returns an internal Okta user property ('id', 'status', 'created', etc.).", ex:"user.getInternalProperty('status')" },
-        { sig:"Groups.contains(app, pattern, limit)",         desc:'Returns groups from the app whose name contains pattern.', ex:"Groups.contains('OKTA', 'Eng', 10)" },
-        { sig:"Groups.startsWith(app, pattern, limit)",       desc:'Returns groups from the app whose name starts with pattern.', ex:"Groups.startsWith('OKTA', 'IT_', 10)" },
+        { sig:"Groups.contains(app, pattern, limit)",         desc:'Returns groups from the app whose name contains pattern. Legacy — works only in group-claim expressions, not in property mappings; user.getGroups with a projection is the current form.', ex:"Groups.contains('OKTA', 'Eng', 10)" },
+        { sig:"Groups.startsWith(app, pattern, limit)",       desc:'Returns groups from the app whose name starts with pattern. Legacy — group claims only.', ex:"Groups.startsWith('OKTA', 'IT_', 10)" },
+        { sig:"Groups.endsWith(app, pattern, limit)",         desc:'Returns groups from the app whose name ends with pattern. Legacy — group claims only.', ex:"Groups.endsWith('OKTA', '_Admins', 10)" },
       ],
     },
     {
@@ -367,7 +558,7 @@
         { sig:'findDirectoryUser()',                                  desc:'Returns the AD app user object (or null).',   ex:"findDirectoryUser().sAMAccountName" },
         { sig:'hasWorkdayUser()',                                     desc:'True if the user has a Workday assignment.',  ex:"hasWorkdayUser() ? findWorkdayUser().employeeID : null" },
         { sig:'findWorkdayUser()',                                    desc:'Returns the Workday app user object (or null).', ex:"findWorkdayUser().employeeID" },
-        { sig:'user.getLinkedObject(primaryName)',                    desc:'Returns the linked user object for a relationship.', ex:"user.getLinkedObject('manager').email" },
+        { sig:'user.getLinkedObject(primaryName)',                    desc:"Returns the user on the other side of a linked-object relationship. 'manager' is Okta's built-in primary name and resolves against the fetched manager profile; a custom relationship evaluates to null here because the preview has no data for it.", ex:"user.getLinkedObject('manager').email" },
       ],
     },
     {
@@ -375,6 +566,22 @@
       fns: [
         { sig:'org.name',      desc:'The name of the Okta organization.',      ex:"org.name" },
         { sig:'org.subDomain', desc:'The subdomain of the Okta organization. Useful for building org-specific URLs or routing logic.', ex:"org.subDomain" },
+      ],
+    },
+    // Still in Okta's reference and still accepted by its runtime, so they're
+    // implemented — a legacy expression pasted into the builder has to behave
+    // the way it behaves in Okta. `deprecated: true` is what puts the badge on
+    // the entry and the marker in the Quick Insert list; the Result tab's notice
+    // comes from the evaluator, which carries the same flag on its specs.
+    {
+      ns: 'Deprecated', color: '#6e6e78', deprecated: true,
+      fns: [
+        { sig:'toUpperCase(str)',                        deprecated:true, desc:'Deprecated unqualified form of String.toUpperCase.', ex:"toUpperCase(user.department)" },
+        { sig:'toLowerCase(str)',                        deprecated:true, desc:'Deprecated unqualified form of String.toLowerCase.', ex:"toLowerCase(user.email)" },
+        { sig:'substring(input, startIndex, endIndex)',   deprecated:true, desc:'Deprecated unqualified form of String.substring.', ex:"substring(user.firstName, 0, 1)" },
+        { sig:'substringBefore(str, delimiter)',          deprecated:true, desc:'Deprecated unqualified form of String.substringBefore.', ex:"substringBefore(user.email, '@')" },
+        { sig:'substringAfter(str, delimiter)',           deprecated:true, desc:'Deprecated unqualified form of String.substringAfter.', ex:"substringAfter(user.email, '@')" },
+        { sig:"value matches 'regex'",                    deprecated:true, desc:'Deprecated operator. True when the regex matches the WHOLE value, so a fragment needs its own .* on both sides. A null value is false.', ex:"user.login matches '.*@acme.com'" },
       ],
     },
   ];
@@ -394,7 +601,7 @@
     { ctx:'profile_mapping', tag:'Arrays',  name:'Groups as CSV',              desc:'All Okta group memberships as a comma-separated string.',              expr:"Arrays.toCsvString(groups)" },
     { ctx:'profile_mapping', tag:'Convert', name:'Employee number → integer',  desc:'Converts the employeeNumber string to an integer.',                   expr:"Convert.toInt(user.employeeNumber)" },
     { ctx:'profile_mapping', tag:'Time',    name:'AD pwdLastSet → ISO 8601',   desc:'Converts Windows FILETIME (AD pwdLastSet) to ISO 8601.',               expr:"Time.fromWindowsToIso8601(user.pwdLastSet)" },
-    { ctx:'profile_mapping', tag:'Time',    name:'Hire date → ISO 8601',       desc:'Normalizes the hireDate string from an HR system to ISO 8601.',        expr:"Time.fromStringToIso8601(user.hireDate)" },
+    { ctx:'profile_mapping', tag:'Time',    name:'Hire date → ISO 8601',       desc:'Normalizes the hireDate string from an HR system to ISO 8601.',        expr:"Time.fromStringToIso8601(user.hireDate, 'MM/dd/yyyy')" },
     { ctx:'profile_mapping', tag:'Country', name:'Country code → name',        desc:'Converts a 2-letter country code to its full country name.',           expr:"Iso3166Convert.toName(user.countryCode)" },
     { ctx:'profile_mapping', tag:'org',     name:'Organization name',          desc:'The name of the Okta organization.',                                  expr:"org.name" },
     { ctx:'profile_mapping', tag:'org',     name:'Org subdomain',              desc:'The subdomain of the Okta organization.',                             expr:"org.subDomain" },
@@ -419,8 +626,8 @@
 
     // ── Group Rules ──────────────────────────────────────────────
     { ctx:'group_rules', tag:'Dept',      name:'Engineering department',    desc:'Matches all Engineering department users.',                           expr:"user.department == 'Engineering'" },
-    { ctx:'group_rules', tag:'Status',    name:'Active employees',          desc:'Matches active users who are employees (not contractors).',           expr:"user.status == 'ACTIVE' AND user.workerType == 'Employee'" },
-    { ctx:'group_rules', tag:'Location',  name:'US-based users',            desc:'Matches active users in the United States.',                          expr:"user.countryCode == 'US' AND user.status == 'ACTIVE'" },
+    { ctx:'group_rules', tag:'Status',    name:'Active employees',          desc:'Matches active users who are employees (not contractors).',           expr:"user.getInternalProperty('status') == 'ACTIVE' AND user.workerType == 'Employee'" },
+    { ctx:'group_rules', tag:'Location',  name:'US-based users',            desc:'Matches active users in the United States.',                          expr:"user.countryCode == 'US' AND user.getInternalProperty('status') == 'ACTIVE'" },
     { ctx:'group_rules', tag:'Type',      name:'Contractors and vendors',   desc:'Matches users whose type is Contractor or Vendor.',                   expr:"user.workerType == 'Contractor' OR user.workerType == 'Vendor'" },
     { ctx:'group_rules', tag:'Title',     name:'Senior staff by title',     desc:'Matches Senior, Director, or VP title keywords.',                     expr:"String.stringContains(user.title, 'Senior') OR String.stringContains(user.title, 'Director') OR String.stringContains(user.title, 'VP')" },
     { ctx:'group_rules', tag:'Dept',      name:'Multi-department team',     desc:'Matches Engineering, IT, or DevOps.',                                 expr:"user.department == 'Engineering' OR user.department == 'IT' OR user.department == 'DevOps'" },
@@ -429,7 +636,7 @@
     { ctx:'group_rules', tag:'AD Group',  name:'AD-synced group by name',   desc:'AD groups synced to Okta appear as Okta groups — check by name.',    expr:"isMemberOfGroupName('Domain Admins')" },
     { ctx:'group_rules', tag:'AD Group',  name:'Group name prefix match',   desc:'Matches users in any group whose name starts with a prefix.',          expr:"isMemberOfGroupNameStartsWith('IT_')" },
     { ctx:'group_rules', tag:'AD Group',  name:'Group name contains',       desc:'Matches users in any group whose name contains a substring.',          expr:"isMemberOfGroupNameContains('Admin')" },
-    { ctx:'group_rules', tag:'Combined',  name:'Dept + active + country',   desc:'Combines multiple criteria with AND.',                                 expr:"user.department == 'Engineering' AND user.status == 'ACTIVE' AND user.countryCode == 'US'" },
+    { ctx:'group_rules', tag:'Combined',  name:'Dept + active + country',   desc:'Combines multiple criteria with AND.',                                 expr:"user.department == 'Engineering' AND user.getInternalProperty('status') == 'ACTIVE' AND user.countryCode == 'US'" },
     { ctx:'group_rules', tag:'Combined',  name:'Admin groups check',        desc:'Matches users in any admin-related Okta group.',                       expr:"isMemberOfAnyGroup('Super Admins', 'IT Admins', 'Okta Admins', 'Domain Admins')" },
 
     // ── OAuth 2.0 / OIDC Claims ──────────────────────────────────
@@ -467,6 +674,23 @@
     { ctx:'app_sign_on', tag:'Time',    name:'New user (created recently)', desc:'True when the user was created within the last 30 days.',              expr:"user.created.parseStringTime().withinDays(30)" },
     { ctx:'app_sign_on', tag:'Time',    name:'Password recently changed',   desc:'True when password was changed in the last 7 days.',                   expr:"user.passwordChanged.parseStringTime().withinDays(7)" },
     { ctx:'app_sign_on', tag:'Combined',name:'MFA + admin group',           desc:'Requires both MFA and admin group membership.',                        expr:"Arrays.contains(session.amr, 'mfa') AND user.isMemberOf({'group.profile.name': 'Admins'})" },
+    { ctx:'app_sign_on', tag:'Device',  name:'Disk encryption required',    desc:'True when the volume is fully encrypted. Values: NONE, USER, FULL, ALL_INTERNAL_VOLUMES, SYSTEM_VOLUME.', expr:"device.profile.diskEncryptionType == 'FULL'" },
+    { ctx:'app_sign_on', tag:'Device',  name:'Screen lock strength',        desc:'True when the device locks with biometrics rather than a passcode or nothing.', expr:"device.assurance.screenLockType == 'BIOMETRIC'" },
+    { ctx:'app_sign_on', tag:'Device',  name:'Device integrity intact',     desc:'Blocks jailbroken, rooted, emulated, hooked, or repackaged devices.',   expr:"device.profile.integrityJailbreak == false AND device.profile.integrityEmulator == false AND device.profile.integrityHook == false AND device.profile.integrityRepackage == false" },
+    { ctx:'app_sign_on', tag:'Device',  name:'Minimum OS version',          desc:'Segment-wise version compare. Do not use < or > on a version — 14.10 sorts before 14.9 lexically.', expr:"device.profile.osVersion.versionGreaterThan('14.0.0')" },
+    { ctx:'app_sign_on', tag:'Device',  name:'Okta Verify up to date',      desc:'True when the Okta Verify build is at or past the required version.',   expr:"device.provider.oktaVerify.version.versionLessThan('9.0.0') == false" },
+    { ctx:'app_sign_on', tag:'Device',  name:'Secure hardware present',     desc:'True when the device has a TPM or secure enclave.',                     expr:"device.profile.secureHardwarePresent == true" },
+    { ctx:'app_sign_on', tag:'Device',  name:'Windows firewall on',         desc:'Windows Security Center signal. Only populated on Windows.',            expr:"device.provider.wsc.fireWall == 'ON'" },
+    { ctx:'app_sign_on', tag:'Device',  name:'Zero Trust score threshold',  desc:'Partner-supplied Zero Trust Assessment score, 0-100.',                  expr:"device.provider.zta.overall > 70" },
+    { ctx:'app_sign_on', tag:'Device',  name:'Platform check',              desc:'True on corporate desktop platforms. Values: IOS, ANDROID, WINDOWS, MACOS, CHROMEOS.', expr:"device.profile.platform == 'MACOS' OR device.profile.platform == 'WINDOWS'" },
+    { ctx:'app_sign_on', tag:'Risk',    name:'No anomalous behavior',       desc:'True when no behavior-detection rule fired on this sign-in.',           expr:"Arrays.isEmpty(security.behaviors)" },
+    { ctx:'app_sign_on', tag:'Risk',    name:'New country detected',        desc:'True when Okta flagged the sign-in as from a new country.',             expr:"Arrays.contains(security.behaviors, 'New Country')" },
+    { ctx:'app_sign_on', tag:'Login',   name:'Sign-in identifier domain',   desc:'Reads what the user typed at the widget, which can differ from user.login.', expr:"String.substringAfter(login.identifier, '@') == 'acme.com'" },
+    { ctx:'app_sign_on', tag:'Combined',name:'Managed + encrypted + MFA',   desc:'Full corporate-device posture check.',                                  expr:"device.profile.managed == true AND device.profile.diskEncryptionType == 'FULL' AND Arrays.contains(session.amr, 'mfa')" },
+    { ctx:'access_cert', tag:'Entitlement', name:'Entitlement value check', desc:'Reads a governance entitlement on the app assignment.',                 expr:"appuser.entitlements.role == 'Contributor'" },
+    { ctx:'access_cert', tag:'Entitlement', name:'Has a named license',     desc:'True when a multi-valued entitlement contains the value.',              expr:"Arrays.contains(appuser.entitlements.licenses, 'Professional')" },
+    { ctx:'access_cert', tag:'Request',     name:'Grant operations only',   desc:'Restricts the rule to access grants.',                                  expr:"accessRequest.operation == 'GRANT'" },
+    { ctx:'access_cert', tag:'Request',     name:'Request type check',      desc:'Reads the kind of access being certified.',                             expr:"accessRequest.metadata.type == 'APP_ACCESS'" },
 
     // ── IdP Attribute Mapping ────────────────────────────────────
     // These map attributes FROM an external SAML/OIDC IdP (idpuser) INTO the Okta profile.
@@ -499,15 +723,46 @@
     if (typeof v==='boolean')    return `<span class="r-bool">${v}</span>`;
     if (typeof v==='number')     return `<span class="r-num">${v}</span>`;
     if (v instanceof Array)      return `<span class="r-arr">[${v.map(fmtResult).join(', ')}]</span>`;
+    // A ZonedDateTime from DateTime.now() / .parseStringTime() is an object, but
+    // JSON.stringify would dump its internals ({"_d":…,"_zone":…}) instead of the
+    // timestamp. Render what Okta would emit if the expression stopped here.
+    if (v && v._isOELDateTime)   return `<span class="r-str">"${esc(v.toString())}"</span>`;
+    // Same for a CountryCode from .parseCountryCode() — an expression that stops
+    // there is incomplete (Okta expects a .toName()/.toAlpha2() to follow), so
+    // show the alpha-2 form plus a nudge rather than the wrapper's guts.
+    if (v && v._isOELCountryCode) {
+      const a2 = v.toAlpha2();
+      return a2 === null
+        ? '<span class="r-null">null</span> <span class="r-hint">— unrecognized country</span>'
+        : `<span class="r-str">"${esc(a2)}"</span> <span class="r-hint">— CountryCode; chain .toName() / .toAlpha3() / .toNumeric()</span>`;
+    }
     if (typeof v==='object')     return `<span class="r-obj">${esc(JSON.stringify(v,null,2))}</span>`;
     return `<span class="r-str">"${esc(String(v))}"</span>`;
   }
+
+  // Restrictions Okta documents that don't belong to any one context, so they're
+  // checked on top of the active context's own list.
+  const GLOBAL_RESTRICTIONS = [
+    {
+      // Okta's supported getInternalProperty("status") values don't include
+      // DEPROVISIONED — a deprovisioned user has no active session to evaluate
+      // against, so this comparison is never true rather than being an error.
+      pattern: /getInternalProperty\s*\(\s*['"]status['"]\s*\)[^)]*?['"]DEPROVISIONED['"]|['"]DEPROVISIONED['"][^)]*?getInternalProperty\s*\(\s*['"]status['"]\s*\)/,
+      msg: 'DEPROVISIONED is not a supported value for getInternalProperty("status") — this condition never matches. Supported values include ACTIVE, STAGED, PROVISIONED, RECOVERY, LOCKED_OUT, PASSWORD_EXPIRED, SUSPENDED',
+    },
+    {
+      // Version strings compared with the relational operators sort lexically,
+      // so 14.10 reads as older than 14.9 and 9 as newer than 10.
+      pattern: /(?:osVersion|oktaVerify\.version)\s*(?:<=|>=|<|>)|(?:<=|>=|<|>)\s*[^\s]*(?:osVersion|oktaVerify\.version)/,
+      msg: 'Comparing a version with < or > sorts it as a string, so 14.10 reads as older than 14.9. Use versionGreaterThan() / versionLessThan() instead',
+    },
+  ];
 
   function getWarnings(expr, ctxId) {
     if (!expr || !ctxId) return [];
     const ctx = CONTEXTS.find(c => c.id === ctxId);
     if (!ctx) return [];
-    return ctx.restrictions
+    return [...ctx.restrictions, ...GLOBAL_RESTRICTIONS]
       .filter(r => r.pattern ? r.pattern.test(expr) : (r.fn && r.fn(expr)))
       .map(r => r.msg);
   }
@@ -553,8 +808,8 @@
           <span class="ref-ns-count">${ns.fns.length}</span>
         </div>
         ${ns.fns.map(fn => `
-          <div class="ref-fn" data-insert="${esc(fn.ex)}">
-            <code class="ref-sig">${esc(fn.sig)}</code>
+          <div class="ref-fn${fn.deprecated ? ' ref-fn-dep' : ''}" data-insert="${esc(fn.ex)}">
+            <code class="ref-sig">${esc(fn.sig)}</code>${fn.deprecated ? '<span class="ref-dep">deprecated</span>' : ''}
             <p class="ref-desc">${esc(fn.desc)}</p>
             <code class="ref-ex">${esc(fn.ex)}</code>
           </div>`).join('')}
@@ -594,6 +849,27 @@
   // Build a scrollable attribute list for any profile variable (user, appuser, idpuser, etc.)
   // For user + appuser we merge in the org's schema so every DECLARED attribute is listed,
   // even if the currently selected user has no value for it.
+  // Flatten nested signal objects to dotted leaf paths, so the Identity Engine
+  // roots are browsable: `device` has to offer `profile.platform` and
+  // `provider.zta.overall`, not a `profile` row that reads "[object Object]".
+  // Arrays stay whole — `session.amr` is the expression an author wants, not
+  // `session.amr.0`. Depth is capped because the deepest documented path is
+  // three segments (`device.provider.oktaVerify.version`) and a cycle in a
+  // fetched record shouldn't be able to hang the picker.
+  function flattenAttrs(obj, prefix = '', depth = 0, out = {}) {
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === 'function') continue;
+      const path = prefix ? `${prefix}.${k}` : k;
+      if (v && typeof v === 'object' && !Array.isArray(v) && depth < 3) {
+        // An object with no readable leaves still deserves a row, otherwise it
+        // vanishes from the picker entirely.
+        if (Object.keys(v).length) { flattenAttrs(v, path, depth + 1, out); continue; }
+      }
+      out[path] = v;
+    }
+    return out;
+  }
+
   function buildChips(varName) {
     const populated = state.profile[varName] || {};
     let base = {};
@@ -601,7 +877,7 @@
     if (varName === 'appuser' && state.appSchema)  base = state.appSchema;
     // Populated values override the null placeholders from the schema.
     const merged = { ...base, ...populated };
-    const entries = Object.entries(merged).filter(([, v]) => typeof v !== 'function');
+    const entries = Object.entries(flattenAttrs(merged));
     if (!entries.length) {
       return `<div class="attr-empty">No attributes for <code>${esc(varName)}</code></div>`;
     }
@@ -630,17 +906,30 @@
   function buildVarTabs() {
     const ctx = CONTEXTS.find(c => c.id === state.ctx) || CONTEXTS[0];
     const available = ctx.vars || ['user'];
-    // Only show the tabs for vars that exist in the current context
-    const ALL_VARS = ['user', 'appuser', 'idpuser', 'org', 'app', 'access'];
+    // Only show the tabs for vars that exist in the current context. Order is
+    // the tab order, so profile roots come before the Identity Engine runtime
+    // signals — those only appear in the two contexts that can read them.
+    const ALL_VARS = ['user', 'appuser', 'idpuser', 'org', 'app', 'access',
+                      'device', 'session', 'security', 'login', 'accessRequest'];
     return ALL_VARS.filter(v => available.includes(v)).map(v =>
       `<button class="var-tab${state.chipVar === v ? ' var-tab-on' : ''}" data-var="${v}">${v}</button>`
     ).join('');
   }
 
+  // Quick Insert picker. A deprecated entry is marked here rather than in
+  // autocomplete: autocomplete only fires after a '.', and every deprecated
+  // construct is either an unqualified call or an operator, so none of them can
+  // ever appear in that list. This dropdown is the picker they DO appear in, so
+  // it's where the marker has to be for a user to see it before choosing.
+  // A <option> can't carry styling reliably across platforms, hence the suffix.
   function buildFnOptions() {
     return FUNCTION_REFERENCE.map(ns =>
       `<optgroup label="${esc(ns.ns)}">${
-        ns.fns.map(fn => `<option value="${esc(fn.ex)}" title="${esc(fn.sig)}">${esc(fn.sig.split('(')[0])}</option>`).join('')
+        ns.fns.map(fn => {
+          const name = fn.sig.split('(')[0];
+          return `<option value="${esc(fn.ex)}" title="${esc(fn.sig)}${fn.deprecated ? ' — deprecated' : ''}">${
+            esc(name)}${fn.deprecated ? ' (deprecated)' : ''}</option>`;
+        }).join('')
       }</optgroup>`
     ).join('');
   }
@@ -906,11 +1195,22 @@
       badge.textContent = '✗ error'; badge.className = 'badge badge-err';
     }
 
-    // Context warnings
-    const ws = getWarnings(expr, state.ctx);
+    // Context warnings, then deprecation notices. Deprecations come from the
+    // evaluator (which reads them off the parsed AST, so a construct in an
+    // untaken ternary branch still reports) rather than from a regex here —
+    // the `deprecated` flag on OEL_SPECS is the one source for them. They're
+    // styled apart from the ⚠ restrictions because the meaning differs: a
+    // restriction means Okta rejects this, a deprecation means Okta still
+    // accepts it but there's a current spelling.
+    const ws   = getWarnings(expr, state.ctx);
+    const deps = res.deprecations || [];
     if (warn) {
-      if (ws.length) {
-        warn.innerHTML = ws.map(w => `<div class="warn-item">⚠ ${esc(w)}</div>`).join('');
+      const rows = [
+        ...ws.map(w   => `<div class="warn-item">⚠ ${esc(w)}</div>`),
+        ...deps.map(d => `<div class="warn-item warn-dep">ⓘ ${esc(d)}</div>`),
+      ];
+      if (rows.length) {
+        warn.innerHTML = rows.join('');
         warn.classList.remove('hidden');
       } else {
         warn.innerHTML = ''; warn.classList.add('hidden');
@@ -1169,7 +1469,7 @@ ${attrLines}
   // the invisible characters in the textarea.
   const HL_KEYWORDS   = new Set(['null', 'true', 'false', 'AND', 'OR', 'and', 'or']);
   const HL_NAMESPACES = new Set(['String', 'Arrays', 'Time', 'Convert', 'Iso3166Convert', 'DateTime', 'Groups']);
-  const HL_ROOTS      = new Set(['user', 'appuser', 'idpuser', 'app', 'access', 'org', 'device', 'session', 'security', 'groups', 'groupIds', 'client', 'oauth_request', 'context']);
+  const HL_ROOTS      = new Set(['user', 'appuser', 'idpuser', 'app', 'access', 'org', 'device', 'session', 'security', 'groups', 'groupIds', 'client', 'oauth_request', 'context', 'login', 'accessRequest']);
 
   // Simple hand-rolled tokenizer sufficient for coloring. NOT the evaluator's
   // parser — that one handles precedence + AST; this one just yields spans.
@@ -1206,7 +1506,15 @@ ${attrLines}
         while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j++;
         const word = src.substring(i, j);
         let cls;
-        if (HL_KEYWORDS.has(word))        cls = 'hl-kw';
+        // `matches` is the deprecated relational operator, except directly after
+        // a '.', where it's a property name. Same rule the evaluator's lexer
+        // applies, so the coloring can't contradict the parse.
+        if (word === 'matches') {
+          let k = i - 1;
+          while (k >= 0 && /\s/.test(src[k])) k--;
+          cls = src[k] === '.' ? 'hl-ident' : 'hl-kw';
+        }
+        else if (HL_KEYWORDS.has(word))   cls = 'hl-kw';
         else if (HL_NAMESPACES.has(word)) cls = 'hl-ns';
         else if (HL_ROOTS.has(word))      cls = 'hl-root';
         else if (src[j] === '(')          cls = 'hl-fn';     // followed by ( → function call
@@ -1277,8 +1585,9 @@ ${attrLines}
             credentials:'include', headers:{'Accept':'application/json'},
           });
           const gs = gr.ok ? await gr.json() : [];
-          return { user: u, groups: gs.map(g => g.profile.name), groupIds: gs.map(g => g.id) };
-        } catch { return { user: u, groups: [], groupIds: [] }; }
+          return { user: u, groups: gs.map(g => g.profile.name), groupIds: gs.map(g => g.id),
+                   groupObjects: gs.map(toGroupObject) };
+        } catch { return { user: u, groups: [], groupIds: [], groupObjects: [] }; }
       }));
 
       // Evaluate per user with a synthesized profile matching what the main
@@ -1286,7 +1595,7 @@ ${attrLines}
       const evaluator = new OELEvaluator({});
       const matches = [];
       let passed = 0, failed = 0, errored = 0;
-      for (const {user, groups, groupIds} of withGroups) {
+      for (const {user, groups, groupIds, groupObjects} of withGroups) {
         const perProfile = {
           user:     { ...user.profile, id: user.id, status: user.status,
                        created: user.created, lastLogin: user.lastLogin },
@@ -1295,7 +1604,7 @@ ${attrLines}
           org:      state.profile.org,
           app:      DEFAULT_PROFILE.app,
           access:   DEFAULT_PROFILE.access,
-          groups, groupIds,
+          groups, groupIds, groupObjects,
           session:  DEFAULT_PROFILE.session,
           security: DEFAULT_PROFILE.security,
           device:   DEFAULT_PROFILE.device,
@@ -1525,6 +1834,33 @@ ${attrLines}
     return fetchPaginated(`/api/v1/users/${uid}/groups?limit=200`, { maxPages: 10 });
   }
 
+  // Okta group record → the shape `user.getGroups()` returns. Deliberately a
+  // subset, not the raw record: the fields below are exactly the ones Okta
+  // documents as readable from a group object (projection keys id, type,
+  // created, lastUpdated, lastMembershipUpdated, profile.name,
+  // profile.description — plus source.id for criteria matching). Passing the
+  // record through whole would let `.![_links.source.href]` and `.![objectClass]`
+  // evaluate here against a surface Okta doesn't expose.
+  //
+  // `source.id` isn't a field on the API record; for an app group Okta returns
+  // the originating app instance as a link, so derive the id from its href.
+  function toGroupObject(g) {
+    const href = g._links && g._links.source && g._links.source.href;
+    const srcId = href ? String(href).split('/').filter(Boolean).pop() : null;
+    return {
+      id:                     g.id,
+      type:                   g.type,
+      created:                g.created ?? null,
+      lastUpdated:            g.lastUpdated ?? null,
+      lastMembershipUpdated:  g.lastMembershipUpdated ?? null,
+      profile: {
+        name:        g.profile ? g.profile.name : null,
+        description: g.profile ? (g.profile.description ?? null) : null,
+      },
+      ...(srcId ? { source: { id: srcId } } : {}),
+    };
+  }
+
   // Fetch a single user by id. Used to resolve manager profiles so expressions
   // like getManagerUser(user).email return real values rather than a derived
   // best-guess split of user.manager.
@@ -1725,6 +2061,11 @@ ${attrLines}
         org: state.profile.org,
         groups:   groups.map(g => g.profile.name),
         groupIds: groups.map(g => g.id),
+        // Full records alongside the two flat arrays, not instead of them:
+        // `Arrays.contains(groups, 'Engineering')` is documented usage and reads
+        // the name array, while `user.getGroups()` criteria need group.type and
+        // group.source.id, and its projections need real objects.
+        groupObjects: groups.map(toGroupObject),
         session:  state.profile.session  || DEFAULT_PROFILE.session,
         security: state.profile.security || DEFAULT_PROFILE.security,
         device:   state.profile.device   || DEFAULT_PROFILE.device,
@@ -2107,6 +2448,10 @@ ${attrLines}
   const AC_ROOTS = new Set([
     'user', 'appuser', 'idpuser', 'app', 'access', 'org',
     'device', 'session', 'security', 'groups',
+    // Identity Engine roots. They complete off state.profile like the rest —
+    // which is why DEFAULT_PROFILE carries the full documented surface rather
+    // than a couple of representative fields.
+    'login', 'accessRequest',
     'String', 'Arrays', 'Time', 'Convert', 'Iso3166Convert', 'DateTime', 'Groups',
   ]);
 
@@ -2145,11 +2490,15 @@ ${attrLines}
 
   // Identity Engine method-style completions available on string values.
   // Only Okta-documented OEL / IE methods — no invented aliases.
+  // Keep in sync with STRING_METHOD_ALIASES in evaluator.js — a name here that
+  // isn't in that table autocompletes into an expression that won't evaluate.
   const STRING_METHOD_COMPLETIONS = [
     'substringBefore', 'substringAfter', 'substring',
-    'toUpperCase', 'toLowerCase', 'trim',
-    'replace', 'replaceFirst', 'startsWith',
-    'parseStringTime',
+    'toUpperCase', 'toLowerCase', 'removeSpaces',
+    'replace', 'replaceFirst', 'contains', 'length',
+    'toInteger', 'toNumber',
+    'parseStringTime', 'parseUnixTime', 'parseWindowsTime',
+    'parseCountryCode', 'versionGreaterThan', 'versionLessThan',
   ];
 
   // Method completions on ZonedDateTime-like values (results of parseStringTime,
@@ -2157,7 +2506,10 @@ ${attrLines}
   // executing, but users chain them after other calls — signature help will
   // still work in that case.
   const DATETIME_METHOD_COMPLETIONS = [
-    'withinDays', 'plusDays', 'toString',
+    'withinDays', 'withinHours', 'withinMinutes', 'withinSeconds',
+    'plusDays', 'plusHours', 'plusMinutes', 'plusSeconds',
+    'minusDays', 'minusHours', 'minusMinutes', 'minusSeconds',
+    'toZone', 'toString', 'toUnix', 'toWindows',
   ];
 
   // Return {items, replaceStart} or null if no autocomplete should show.

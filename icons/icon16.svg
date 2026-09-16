@@ -1,0 +1,37 @@
+<!--
+  Small-size (16px) icon source.
+
+  Same composition as icon.svg, retuned so it survives rasterization at 16px:
+    · lighter background gradient  — the original #0f172a/#1e3a5f left the strokes
+                                     nearly invisible against it at this size
+    · stroke-width 7 → 13          — 7/128 renders under one pixel at 16px
+    · brighter cyan + green        — more contrast against the background
+    · dot r 7 → 12                 — the accent needs to hold at least 1.5px
+
+  Exported to icon16.png only. icon48.png / icon128.png come from icon.svg.
+  See the Development section of README.md for the export command.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1b2b45"/>
+      <stop offset="100%" style="stop-color:#2a4a75"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="128" height="128" rx="22" fill="url(#bg)"/>
+
+  <!-- Left curly brace { -->
+  <path d="M 46 24 Q 33 24 33 37 L 33 55 Q 33 64 22 64 Q 33 64 33 73 L 33 91 Q 33 104 46 104"
+    stroke="#7dd8ff" stroke-width="13" fill="none"
+    stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Right curly brace } -->
+  <path d="M 82 24 Q 95 24 95 37 L 95 55 Q 95 64 106 64 Q 95 64 95 73 L 95 91 Q 95 104 82 104"
+    stroke="#7dd8ff" stroke-width="13" fill="none"
+    stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Center accent dot -->
+  <circle cx="64" cy="64" r="12" fill="#c3f0c5"/>
+</svg>
