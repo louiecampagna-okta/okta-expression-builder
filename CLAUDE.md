@@ -41,6 +41,12 @@ Adding a function means touching **three** places, or it will half-work:
 
 The `sig` string is parsed, so its shape decides whether signature help works. `SIG_INDEX` skips entries whose receiver is one of `SIG_PLACEHOLDER_RECEIVERS` (`value`, `dateValue`) — the stand-ins the docs use when documenting a chain method — and entries with no parens at all (`org.name`, `value matches 'regex'`), which aren't calls. Everything else indexes, including lowercase top-level functions and `user.*` methods. A new placeholder receiver has to be added to that set, or the pseudo-signature will register as a callable function; conversely, writing a real function's signature with a placeholder-looking receiver silently costs it signature help. This filter was previously "skip anything not starting with a capital", which cost 23 real functions their signature help without any visible symptom.
 
+### The editor's visible text is the `<pre>`, not the textarea
+
+The highlight overlay puts a `<pre>` behind the textarea and renders the textarea's own glyphs transparent. So **writing `ta.value` without re-rendering leaves the new expression invisible** — it evaluates fine and produces correct results while the box shows nothing, or shows whatever was there before. It fails in the least diagnosable way possible: the feature looks broken but the logic is right.
+
+This has been the bug twice. The Reference tab shipped with it while Templates worked, purely because one handler re-rendered and the other didn't. Whole-value writes go through **`setExpression(text)`**; use it rather than touching `.value`. `insertAt` is the other sanctioned writer (it uses `setRangeText` for caret-relative inserts) and `acceptAutocomplete` writes inline because it needs precise caret control between the steps — those three are the complete set. The audit greps `content.js` and fails if any `ta.value` write has no `renderHighlight()` within a few lines, so a fourth one can't slip in silently.
+
 ### Prototype-chain leakage
 
 The dominant bug class in this evaluator, found four separate times. Any map indexed by a user-supplied identifier leaks `Object.prototype`; any primitive receiver leaks `String`/`Array`/`Number.prototype`. Without guards, `Iso3166Convert.toName('constructor')` reports the country name as `Object` (a function carries a `.name`), `String.toString(x)` answers `"[object Object]"`, and `user.email.padStart(20)` evaluates as though it were OEL.

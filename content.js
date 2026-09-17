@@ -3189,6 +3189,21 @@ ${attrLines}
   }
 
   // ── Insert helpers ────────────────────────────────────────────
+
+  // Replace the whole expression. Every programmatic write to the textarea has to
+  // re-render the highlight layer: the `<pre>` behind the textarea is the visible
+  // text and the textarea's own glyphs are transparent, so setting `.value`
+  // without re-rendering leaves the new expression invisible — it evaluates
+  // correctly and shows nothing, or shows whatever was there before. That's not a
+  // hypothetical; the Reference tab shipped with exactly this bug because it set
+  // `.value` directly. Route new whole-value writes through here instead.
+  function setExpression(text) {
+    const ta = document.getElementById('expr-input'); if (!ta) return;
+    ta.value = text;
+    renderHighlight();
+    scheduleEval();
+  }
+
   function insertAt(text) {
     const ta = document.getElementById('expr-input'); if (!ta) return;
     ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end');
@@ -3349,13 +3364,13 @@ ${attrLines}
       });
     });
     document.getElementById('btn-clear')?.addEventListener('click', () => {
-      const ta = document.getElementById('expr-input'); if(ta){ta.value=''; renderHighlight(); scheduleEval();}
+      setExpression('');
     });
 
     // Reference: click to use in builder
     document.getElementById('ref-list')?.addEventListener('click', e => {
       const fn = e.target.closest('.ref-fn');
-      if (fn?.dataset.insert) { const ta=document.getElementById('expr-input'); if(ta){ta.value=fn.dataset.insert;scheduleEval();} switchTab('builder'); }
+      if (fn?.dataset.insert) { setExpression(fn.dataset.insert); switchTab('builder'); }
     });
 
     // Reference: filter
@@ -3395,8 +3410,7 @@ ${attrLines}
     document.getElementById('tpl-list')?.addEventListener('click', e => {
       const item = e.target.closest('.tpl-item');
       if (item?.dataset.expr) {
-        const ta = document.getElementById('expr-input');
-        if (ta) { ta.value = item.dataset.expr; renderHighlight(); scheduleEval(); }
+        setExpression(item.dataset.expr);
         switchTab('builder');
       }
     });
