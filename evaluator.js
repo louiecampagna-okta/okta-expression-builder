@@ -957,6 +957,30 @@
   //  CONTEXT FACTORY
   // ═══════════════════════════════════════════════════════════════
 
+  // ── Group criteria vocabulary ────────────────────────────────────
+  // Documented sets, exported on the public class so content.js can drive
+  // autocomplete off them instead of keeping a second hand-copied list. The
+  // operators and the three group types all appear verbatim in the reference's
+  // own getGroups / isMemberOf examples.
+  const GROUP_CRITERIA_KEY_NAMES = ['group.id', 'group.type', 'group.source.id', 'group.profile.name'];
+  const GROUP_OPERATORS = ['STARTS_WITH', 'EXACT'];   // STARTS_WITH is the default
+  const GROUP_TYPES     = ['OKTA_GROUP', 'APP_GROUP', 'BUILT_IN'];
+  // The projection fields Okta illustrates. Not a limit — the docs say the
+  // projection "can be any group attribute" and point at the List all groups
+  // API schema, so a field outside this list still resolves if the record
+  // carries it. This is the discoverable set, not the permitted one.
+  const GROUP_FIELDS = ['id', 'type', 'created', 'lastUpdated', 'lastMembershipUpdated',
+                        'profile.name', 'profile.description'];
+
+  // Okta's docs write a `group.profile.name` criterion as `'Engineering.*'` and
+  // describe the result as groups whose name *starts with* `Engineering` — the
+  // trailing `.*` is decoration on an already-prefix match, not a pattern the
+  // page ever calls a regex. Dropping it is what makes the documented examples
+  // return what the documentation says they return. Deliberately only a trailing
+  // `.*`: treating the whole value as a regex would break a group legitimately
+  // named `C++ Devs` or `R&D (EU)`, and nothing in the docs asks for that.
+  const stripTrailingGlob = (v) => String(v).replace(/\.\*$/, '');
+
   // Okta user-record fields that are NOT profile attributes. Used to split
   // `user.profile.$prop` back out of the flattened user object. Wider than the
   // six properties Okta documents for `user.$property` because these are all
@@ -1013,7 +1037,7 @@
         if (actual == null) return false;
         const wanted = Array.isArray(criteria[key]) ? criteria[key] : [criteria[key]];
         const ok = wanted.some(w => (key === 'group.profile.name' && op === 'STARTS_WITH')
-          ? String(actual).startsWith(String(w))
+          ? String(actual).startsWith(stripTrailingGlob(w))
           : String(actual) === String(w));
         if (!ok) return false;
       }
@@ -1352,6 +1376,26 @@
       }
     }
   }
+
+  // ── Introspection for the UI ─────────────────────────────────────
+  // content.js drives autocomplete off these rather than keeping its own copies.
+  // The method-name lists in particular used to be hand-maintained mirrors of the
+  // alias tables with a "keep in sync" comment; reading the real tables means a
+  // method added below can't go missing from the completion list, and a completion
+  // can't be offered for a method that doesn't exist.
+  OELEvaluator.METHOD_NAMES = {
+    string:   Object.keys(STRING_METHOD_ALIASES),
+    array:    Object.keys(ARRAY_METHOD_ALIASES),
+    number:   Object.keys(NUMBER_METHOD_ALIASES),
+    datetime: Object.getOwnPropertyNames(OELDateTime.prototype).filter(n => n !== 'constructor'),
+    country:  Object.getOwnPropertyNames(OELCountryCode.prototype)
+                .filter(n => n !== 'constructor' && !n.startsWith('_is')),
+  };
+  OELEvaluator.GROUP_CRITERIA_KEYS = GROUP_CRITERIA_KEY_NAMES;
+  OELEvaluator.GROUP_OPERATORS     = GROUP_OPERATORS;
+  OELEvaluator.GROUP_TYPES         = GROUP_TYPES;
+  OELEvaluator.GROUP_FIELDS        = GROUP_FIELDS;
+  OELEvaluator.USER_RECORD_KEYS    = USER_RECORD_KEYS;
 
   global.OELEvaluator = OELEvaluator;
 
