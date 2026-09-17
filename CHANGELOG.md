@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.5.0] — 2026-09-17
 
 `user.getGroups` is the most capable function in the evaluator and was the least reachable from the editor. Typing `user.getG` completed to nothing, its criteria keys and projection fields were pure memorization, and one of Okta's own documented examples returned the wrong answer. This makes the group syntax discoverable and fixes the fidelity gap underneath it.
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Okta Expression Builder",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Build and live-preview Okta Expression Language (OEL) expressions directly in the Okta admin console.",
   "permissions": [],
   "content_scripts": [
