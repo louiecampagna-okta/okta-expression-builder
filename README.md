@@ -18,7 +18,7 @@ A Chrome / Edge browser extension that injects a floating overlay into the Okta 
 
 - **Live evaluation** — expressions evaluate in real time against the selected user/app/context
 - **Full OEL coverage** — `String.*`, `Arrays.*`, `Time.*`, `Convert.*`, `Iso3166Convert.*`, group functions, manager/directory functions, ternary, Elvis (`?:`), null-coalescing (`??`), `AND`/`OR`, the `matches` operator, array index `[n]`, collection projection `.![expr]`, Identity Engine method chaining
-- **Group objects, not just names** — `user.getGroups(...)` returns full group records, so every documented projection works: `user.getGroups({'group.type':'OKTA_GROUP'}).![profile.name]`, `.![id]`, `.![lastMembershipUpdated]`. The plain `groups` string array is unchanged, so `Arrays.contains(groups, 'Engineering')` still reads the way it does in Okta.
+- **Group objects, not just names** — `user.getGroups(...)` returns full group records, so every documented projection works: `.![name]` (the form the classic reference documents) and `.![profile.name]` (the Identity Engine form) both return group names, alongside `.![id]`, `.![lastMembershipUpdated]` and the rest. A projection that addresses nothing on any element reports what's readable instead of returning one null per group. Records pass through whole, so a projection can read any group attribute — which is what Okta documents — not just the seven it illustrates. A trailing `.*` on a `group.profile.name` criterion is treated as the prefix itself, so the documented `{'group.profile.name': 'Engineering.*'}` matches the way the docs say it does. The plain `groups` string array is unchanged, so `Arrays.contains(groups, 'Engineering')` still reads the way it does in Okta.
 - **Deprecated constructs still evaluate** — the five unqualified string functions (`toUpperCase`, `substringBefore`, …) and the `matches` operator are documented as deprecated but still accepted by Okta's runtime, so they're implemented here too. Paste a legacy expression in and it evaluates; the Result tab adds an ⓘ note pointing at the current spelling, and the Reference tab badges them.
 - **OAuth-time variables** — `client.*`, `oauth_request.*`, `context.oauth2.*`, `context.device`, `context.session`, `context.security` — Okta claim expressions that reference these now resolve rather than throwing
 - **Full token preview** (OAuth Claims context) — pick **ID Token** or **Access Token**, pick **Org Auth Server** or any **Custom Authorization Server**. The extension fetches the server's real claim mappings (`/api/v1/authorizationServers/{id}/claims`) and evaluates every active claim in the current context. What you see IS what Okta would emit at runtime:
@@ -43,7 +43,9 @@ A Chrome / Edge browser extension that injects a floating overlay into the Okta 
 
 - **Syntax highlighting** — expressions are color-coded in place: strings (green), numbers (orange), keywords like `null`/`AND`/`OR` (purple), namespaces (blue bold), roots (blue), function names (teal), operators/parens (grey). Uses a fixed-width font stack that falls back gracefully across macOS/Windows/Linux.
 - **Autocomplete with signature help** — type `.` after `user`, `appuser`, `app`, `String`, `Arrays`, etc. and pick a suggestion. Attribute completions show their live value + type inline (`email → "jane@acme.com"`, `groups → [5 items]`, `middleName → null`). Function completions show their param signature. Accepting a function inserts `()` with the cursor between them and immediately fires signature help (`Groups.contains(app, pattern, limit)` with the current arg highlighted). Arrow keys navigate, Enter/Tab inserts, Esc closes.
-- **String method chaining** — after a chain that resolves to a string value (`user.email.`), autocomplete suggests Identity Engine method-style completions (`substringBefore`, `toUpperCase`, `toInteger`, `parseStringTime`, `parseCountryCode`, `versionGreaterThan`, etc.). Chains on a date-time value offer the `withinDays` / `plusHours` / `toZone` family.
+- **Attributes and functions in one list** — `user.` offers `getGroups`, `isMemberOf`, `getInternalProperty` and `getLinkedObject` alongside the profile attributes, so the OEL methods on the user object are discoverable instead of memorized. `user.profile.` narrows to just the profile half, matching how Identity Engine separates it from the record-level `user.$property` internals.
+- **Group criteria completion** — inside `user.getGroups({'` or `user.isMemberOf({'`, autocomplete offers the four documented criteria keys plus `operator`. Pick one and it writes `': '` and opens the value position, where the suggestions come from **your tenant's actual groups**: real names for `group.profile.name`, real ids for `group.id` (each hinted with its group name), real source ids for `group.source.id`, and `OKTA_GROUP` / `APP_GROUP` / `BUILT_IN` for `group.type`. Inside a `.![ … ]` projection it offers the group fields Okta documents — `name` first — then any others the fetched records carry.
+- **Method chaining** — after a chain that resolves to a string (`user.email.`), autocomplete suggests the Identity Engine method-style completions (`substringBefore`, `toInteger`, `parseCountryCode`, `versionGreaterThan`, …). Arrays (`groups.`, `session.amr.`, `security.behaviors.`) offer the documented array methods, numbers offer the conversions, and the scanner steps over call parens so `user.created.parseStringTime().` reaches the `withinDays` / `plusHours` / `toZone` family and `user.countryCode.parseCountryCode().` reaches `toName` / `toAlpha3`. Every list is read straight off the evaluator's own tables, so a completion can never name a method that doesn't exist.
 - **Variable browser** — switch between `user`, `appuser`, `idpuser`, `org`, `app`, `access`, `device`, `session`, `security`, `login`, `accessRequest`; each shows a scrollable, searchable list of attributes with their current values (populated shown first, schema-declared nulls dimmed below).
 - **Templates library** — 100+ curated expressions organized by context, spanning all eight contexts including App Sign-On Policy device/risk signals and Access Certification.
 - **Function reference** — searchable docs for every OEL function with signatures, descriptions, and click-to-use examples.
@@ -135,7 +137,10 @@ Arrays.contains('a,b,c', 'b')
 Arrays.toCsvString(groups)
 Arrays.clear(groups)
 
-// Groups — user.getGroups returns full group records, so projections work
+// Groups — user.getGroups returns full group records, so projections work.
+// .![name] is the classic reference's spelling, .![profile.name] the Identity
+// Engine one; both return the group name.
+user.getGroups({'group.profile.name': 'Eng', 'operator': 'STARTS_WITH'}).![name]
 user.getGroups({'group.type': 'OKTA_GROUP'}).![profile.name]
 user.isMemberOf({'group.profile.name': 'Eng'})     // operator defaults to STARTS_WITH
 isMemberOfGroupName('Engineering')
@@ -287,7 +292,7 @@ Bugs and feature requests welcome via GitHub issues. When submitting a PR:
   - `/api/v1/sessions/me` — session gating
   - `/api/v1/org` — org name / subdomain
   - `/api/v1/users?q=...` and `/api/v1/users/{id}` — user search + manager lookup
-  - `/api/v1/users/{id}/groups` — group memberships. The full group records are retained, not just their names: `groups` and `groupIds` stay the flat string arrays they've always been, and `id` / `type` / `created` / `lastUpdated` / `lastMembershipUpdated` / `profile.*` are kept alongside so `user.getGroups(...)` criteria and projections resolve against real data
+  - `/api/v1/users/{id}/groups` — group memberships. The full group records are retained, not just their names: `groups` and `groupIds` stay the flat string arrays they've always been, and the whole record is kept alongside so `user.getGroups(...)` criteria and projections resolve against real data, including group attributes beyond the ones Okta illustrates
   - `/api/v1/apps?q=...` — app search
   - `/api/v1/apps/{appId}/users/{userId}` — app-user assignment
   - `/api/v1/meta/schemas/user/default` and `/api/v1/meta/schemas/apps/{appId}/default` — declared attribute schemas

@@ -23,13 +23,29 @@ The evaluator implements **exactly** the functions documented in Okta's two publ
 
 **Deprecated-but-documented constructs are implemented, not omitted** — Okta's runtime still accepts them, so a legacy expression pasted into the builder has to behave the way it behaves in Okta. They're visibly flagged instead: the five unqualified string functions (`toUpperCase`, `toLowerCase`, `substring`, `substringBefore`, `substringAfter`) and the `matches` operator. `deprecated` on the `OEL_SPECS` entry carries the replacement note and is the single source for it — `collectDeprecations` reads it off the parsed AST and `evaluate()` returns the notes as `deprecations`, which `runEval` renders in the Result tab. `FUNCTION_REFERENCE` carries its own `deprecated: true` for the Reference-tab badge and the Quick Insert marker. Note that the marker is in Quick Insert rather than autocomplete: autocomplete only fires after a `.`, and every deprecated construct is an unqualified call or an operator, so none can ever appear there.
 
+### Don't copy evaluator tables into content.js
+
+`content.js` used to keep hand-written mirrors of the evaluator's method-alias tables for autocomplete, with a "keep in sync" comment. That rots in both directions — a name listed but missing from the table completes into an expression that won't evaluate, and a method added to the table but not the list stays undiscoverable. The tables are exported instead, and anything new the UI needs to enumerate should follow that pattern rather than growing a second copy:
+
+`OELEvaluator.METHOD_NAMES` (`.string` / `.array` / `.number` / `.datetime` / `.country`, read off the real alias tables and prototypes) · `OELEvaluator.GROUP_CRITERIA_KEYS` · `GROUP_OPERATORS` · `GROUP_TYPES` · `GROUP_FIELDS` · `OELEvaluator.USER_RECORD_KEYS`
+
+`GROUP_FIELDS` is the *discoverable* set, not the permitted one — Okta documents a projection as reading any group attribute, so `toGroupObject` passes the fetched record through and a field outside the list still resolves.
+
 Adding a function means touching **three** places, or it will half-work:
 
 1. The implementation in the relevant namespace in `evaluator.js`
 2. An `OEL_SPECS` entry (`OEL_SPECS:591`) — full signature string + typed params, `optional: true` only where Okta genuinely allows omission
-3. A `FUNCTION_REFERENCE` entry (`content.js:444`) — this drives both the Reference tab and autocomplete
+3. A `FUNCTION_REFERENCE` entry (`content.js:444`) — this drives the Reference tab, autocomplete, **and** signature help
 
 `checkCall` (`evaluator.js:784`) enforces arity and arg types against `OEL_SPECS` on every call, and error messages embed the signature. Omitting the spec silently disables that validation.
+
+The `sig` string is parsed, so its shape decides whether signature help works. `SIG_INDEX` skips entries whose receiver is one of `SIG_PLACEHOLDER_RECEIVERS` (`value`, `dateValue`) — the stand-ins the docs use when documenting a chain method — and entries with no parens at all (`org.name`, `value matches 'regex'`), which aren't calls. Everything else indexes, including lowercase top-level functions and `user.*` methods. A new placeholder receiver has to be added to that set, or the pseudo-signature will register as a callable function; conversely, writing a real function's signature with a placeholder-looking receiver silently costs it signature help. This filter was previously "skip anything not starting with a capital", which cost 23 real functions their signature help without any visible symptom.
+
+### The editor's visible text is the `<pre>`, not the textarea
+
+The highlight overlay puts a `<pre>` behind the textarea and renders the textarea's own glyphs transparent. So **writing `ta.value` without re-rendering leaves the new expression invisible** — it evaluates fine and produces correct results while the box shows nothing, or shows whatever was there before. It fails in the least diagnosable way possible: the feature looks broken but the logic is right.
+
+This has been the bug twice. The Reference tab shipped with it while Templates worked, purely because one handler re-rendered and the other didn't. Whole-value writes go through **`setExpression(text)`**; use it rather than touching `.value`. `insertAt` is the other sanctioned writer (it uses `setRangeText` for caret-relative inserts) and `acceptAutocomplete` writes inline because it needs precise caret control between the steps — those three are the complete set. The audit greps `content.js` and fails if any `ta.value` write has no `renderHighlight()` within a few lines, so a fourth one can't slip in silently.
 
 ### Prototype-chain leakage
 
@@ -56,7 +72,7 @@ Three guards, and a new lookup has to use one of them:
 
 ### content.js landmarks
 
-`LS:12` (localStorage keys) · `CONTEXTS:22` · `BASE_DEVICE:139` / `mergeSignals:197` (signal bases the presets are deltas over) · `POLICY_PRESETS:210` · `DEFAULT_PROFILE:301` · `FUNCTION_REFERENCE:444` · `TEMPLATES:586` · `GLOBAL_RESTRICTIONS:740` / `getWarnings:756` · `state:766` · `flattenAttrs:854` · `buildVarTabs:901` · `runEval:1166` · token preview `evaluateAuthServerClaims:1254`, `renderTokenPreview:1334` · syntax highlighting `highlightOEL:1471` · `runGroupRulePreview:1555` · fetch layer `parseNextLink:1781`, `fetchPaginated:1802`, `toGroupObject:1842` and the `fetch*` functions through ~2200 · autocomplete `computeAutocomplete:2511`, `acceptAutocomplete:2673` · signature help `parseSignature:2729`, `SIG_INDEX:2759`, `parseCallContext:2777` · `checkSession:3076` · `init:3099`
+`LS:12` (localStorage keys) · `CONTEXTS:22` · `BASE_DEVICE:139` / `mergeSignals:197` (signal bases the presets are deltas over) · `POLICY_PRESETS:210` · `DEFAULT_PROFILE:301` · `FUNCTION_REFERENCE:444` · `TEMPLATES:586` · `GLOBAL_RESTRICTIONS:740` / `getWarnings:756` · `state:766` · `flattenAttrs:854` · `buildVarTabs:901` · `runEval:1166` · token preview `evaluateAuthServerClaims:1254`, `renderTokenPreview:1334` · syntax highlighting `highlightOEL:1471` · `runGroupRulePreview:1555` · fetch layer `parseNextLink:1781`, `fetchPaginated:1802`, `toGroupObject:1842` and the `fetch*` functions through ~2200 · autocomplete `computeAutocomplete`, `acceptAutocomplete`, `acRank`, `scanChainBefore` / `chainValueType` (chain trigger, steps over call parens), `parseCriteriaContext` / `criteriaCompletions` (inside `getGroups`/`isMemberOf` braces), `parseProjectionContext` / `projectionCompletions` / `endsWithCallTo` (inside `.![ … ]`) · signature help `parseSignature`, `SIG_PLACEHOLDER_RECEIVERS` / `SIG_INDEX`, `parseCallContext` · `checkSession:3076` · `init:3099`
 
 Line numbers drift — grep the identifier rather than trusting the number.
 

@@ -382,18 +382,28 @@
     // and group.source.id, so the mock needs a mix: BUILT_IN for Okta's own
     // "Everyone"-style groups and APP_GROUP for a directory-sourced one, or the
     // documented criteria examples would all match everything.
+    //
+    // `objectClass` is here on purpose: it's a real field on Okta's group record
+    // that isn't one of the seven the docs illustrate for a projection. The docs
+    // say a projection can read any group attribute, so the mock has to carry
+    // something outside the documented set or that can't be exercised offline.
     groupObjects: [
       { id:'00g1', type:'OKTA_GROUP', created:'2023-01-15T00:00:00.000Z', lastUpdated:'2023-01-15T00:00:00.000Z',
-        lastMembershipUpdated:'2024-06-01T00:00:00.000Z', profile:{ name:'Engineering',    description:'Engineering department' } },
+        lastMembershipUpdated:'2024-06-01T00:00:00.000Z', objectClass:['okta:user_group'],
+        profile:{ name:'Engineering',    description:'Engineering department' } },
       { id:'00g2', type:'BUILT_IN',   created:'2022-03-01T00:00:00.000Z', lastUpdated:'2022-03-01T00:00:00.000Z',
-        lastMembershipUpdated:'2024-06-01T00:00:00.000Z', profile:{ name:'All Employees',  description:'Everyone in the org' } },
+        lastMembershipUpdated:'2024-06-01T00:00:00.000Z', objectClass:['okta:user_group'],
+        profile:{ name:'All Employees',  description:'Everyone in the org' } },
       { id:'00g3', type:'OKTA_GROUP', created:'2023-02-01T00:00:00.000Z', lastUpdated:'2023-02-01T00:00:00.000Z',
-        lastMembershipUpdated:'2024-05-01T00:00:00.000Z', profile:{ name:'US Employees',   description:'US-based staff' } },
+        lastMembershipUpdated:'2024-05-01T00:00:00.000Z', objectClass:['okta:user_group'],
+        profile:{ name:'US Employees',   description:'US-based staff' } },
       { id:'00g4', type:'APP_GROUP',  created:'2023-04-10T00:00:00.000Z', lastUpdated:'2023-04-10T00:00:00.000Z',
-        lastMembershipUpdated:'2024-04-10T00:00:00.000Z', profile:{ name:'Okta Users',     description:'Synced from AD' },
+        lastMembershipUpdated:'2024-04-10T00:00:00.000Z', objectClass:['okta:windows_security_principal'],
+        profile:{ name:'Okta Users',     description:'Synced from AD' },
         source:{ id:'0oaadinstance01' } },
       { id:'00g5', type:'OKTA_GROUP', created:'2023-06-20T00:00:00.000Z', lastUpdated:'2023-06-20T00:00:00.000Z',
-        lastMembershipUpdated:'2024-03-15T00:00:00.000Z', profile:{ name:'VPN Access',     description:'VPN entitlement' } },
+        lastMembershipUpdated:'2024-03-15T00:00:00.000Z', objectClass:['okta:user_group'],
+        profile:{ name:'VPN Access',     description:'VPN entitlement' } },
     ],
     session:  BASE_SESSION,
     security: BASE_SECURITY,
@@ -482,7 +492,7 @@
         { sig:'Arrays.clear(array)',                   desc:'Returns an empty array.',                                  ex:"Arrays.clear(groups)" },
         { sig:'Arrays.toCsvString(array)',             desc:'Converts array to a comma-separated string.',              ex:"Arrays.toCsvString(groups)" },
         { sig:'Arrays.flatten(...values)',             desc:'Flattens nested arrays into one flat array.',              ex:"Arrays.flatten([[1,2],[3,4]])" },
-        { sig:'collection.![expression]',             desc:'SpEL projection — maps each element and returns a new array.\nExample: user.getGroups().![profile.name]', ex:"user.getGroups().![profile.name]" },
+        { sig:'collection.![expression]',             desc:'SpEL projection — maps each element and returns a new array.\nOn groups, both spellings of the name work: .![name] is the form the classic reference documents, .![profile.name] the form the Identity Engine reference documents.\nAny group attribute can be projected. A projection that addresses nothing on any element is an error rather than a list of nulls.', ex:"user.getGroups().![name]" },
       ],
     },
     {
@@ -540,8 +550,8 @@
         { sig:'isMemberOfGroupNameContains(substring)',       desc:'True if user is in a group whose name contains substring.', ex:"isMemberOfGroupNameContains('Admin')" },
         { sig:'isMemberOfGroupNameRegex(regex)',              desc:'True if user is in a group whose name matches the regex.', ex:"isMemberOfGroupNameRegex('^IT.*Users$')" },
         { sig:'getFilteredGroups(allowList, group_expression, limit)', desc:"Returns a field from each group in the allowList (a list of group IDs) that the user belongs to. group_expression is one of group.id, group.name, group.description. All three arguments are required.", ex:"getFilteredGroups({'00g1','00g2'}, 'group.name', 10)" },
-        { sig:"user.getGroups(criteria[, ...])", desc:"Returns the user's matching groups as group objects, so projections work. Criteria keys: group.id, group.type, group.source.id, group.profile.name. A list value matches any of its entries (OR); extra criteria objects must all match (AND). Readable per group: id, type, created, lastUpdated, lastMembershipUpdated, profile.name, profile.description.", ex:"user.getGroups({'group.type': {'OKTA_GROUP'}}).![profile.name]" },
-        { sig:"user.isMemberOf(criteria[, ...])", desc:"Identity Engine — checks membership with a criteria object. Same keys as getGroups. 'operator' applies only to group.profile.name and defaults to STARTS_WITH; the other option is EXACT.", ex:"user.isMemberOf({'group.profile.name': 'Engineering'})" },
+        { sig:"user.getGroups(criteria[, ...])", desc:"Returns the user's matching groups as group objects, so projections work. Criteria keys: group.id, group.type, group.source.id, group.profile.name. A list value matches any of its entries (OR); extra criteria objects must all match (AND). A projection can read any group attribute — name, id, type, created, lastUpdated, lastMembershipUpdated, profile.name and profile.description are the ones Okta illustrates. Both .![name] (classic docs) and .![profile.name] (Identity Engine docs) return the group name.", ex:"user.getGroups({'group.type': {'OKTA_GROUP'}}).![name]" },
+        { sig:"user.isMemberOf(criteria[, ...])", desc:"Identity Engine — checks membership with a criteria object. Same keys as getGroups. 'operator' applies only to group.profile.name and defaults to STARTS_WITH; the other option is EXACT. A trailing '.*' on a name is treated as the prefix itself, matching how Okta's own examples are written.", ex:"user.isMemberOf({'group.profile.name': 'Engineering'})" },
         { sig:'user.getInternalProperty(name)',               desc:"Returns an internal Okta user property ('id', 'status', 'created', etc.).", ex:"user.getInternalProperty('status')" },
         { sig:"Groups.contains(app, pattern, limit)",         desc:'Returns groups from the app whose name contains pattern. Legacy — works only in group-claim expressions, not in property mappings; user.getGroups with a projection is the current form.', ex:"Groups.contains('OKTA', 'Eng', 10)" },
         { sig:"Groups.startsWith(app, pattern, limit)",       desc:'Returns groups from the app whose name starts with pattern. Legacy — group claims only.', ex:"Groups.startsWith('OKTA', 'IT_', 10)" },
@@ -644,6 +654,10 @@
     { ctx:'oauth_claims', tag:'User',     name:'Display name',              desc:'Full name for the name claim.',                                        expr:"user.firstName + ' ' + user.lastName" },
     { ctx:'oauth_claims', tag:'User',     name:'Department claim',          desc:'User department attribute.',                                           expr:"user.department" },
     { ctx:'oauth_claims', tag:'Groups',   name:'Groups as CSV',             desc:'All group memberships as a CSV string for a groups claim.',             expr:"Arrays.toCsvString(groups)" },
+    { ctx:'oauth_claims', tag:'Groups',   name:'Okta group names claim',    desc:'Projection over group objects — the current form for a groups claim, replacing the legacy Groups.* functions.', expr:"user.getGroups({'group.type': {'OKTA_GROUP'}}).![profile.name]" },
+    { ctx:'oauth_claims', tag:'Groups',   name:'Group names by prefix',     desc:"The form the classic reference documents for group claims — .![name] and .![profile.name] both read the group name.", expr:"user.getGroups({'group.profile.name': 'Eng', 'operator': 'STARTS_WITH'}).![name]" },
+    { ctx:'oauth_claims', tag:'Groups',   name:'Group IDs claim',          desc:'Same projection reading a different group attribute.',                   expr:"user.getGroups({'group.type': {'OKTA_GROUP'}}).![id]" },
+    { ctx:'oauth_claims', tag:'Groups',   name:'Groups from one directory', desc:'group.source.id disambiguates groups sharing a name across sources.',    expr:"user.getGroups({'group.source.id': '0oaadinstance01'}).![profile.name]" },
     { ctx:'oauth_claims', tag:'App',      name:'App client ID',             desc:'The OAuth 2.0 client ID of the requesting application.',               expr:"app.clientId" },
     { ctx:'oauth_claims', tag:'Condition',name:'Role from group membership',desc:'Returns "admin" or "user" based on group membership.',                 expr:"isMemberOfGroupName('Admins') ? 'admin' : 'user'" },
     { ctx:'oauth_claims', tag:'appuser',  name:'App-specific role',         desc:'Returns role from the app user profile, fallback to "user".',           expr:"appuser.role ?: 'user'" },
@@ -665,6 +679,9 @@
     { ctx:'app_sign_on', tag:'Status',  name:'Active user check',           desc:'True when the user account is active.',                                expr:"user.getInternalProperty('status') == 'ACTIVE'" },
     { ctx:'app_sign_on', tag:'Groups',  name:'Group membership check',      desc:'True when user is in a specific group.',                               expr:"user.isMemberOf({'group.profile.name': 'Engineering'})" },
     { ctx:'app_sign_on', tag:'Group',   name:'Group name starts with',      desc:'Checks group name with STARTS_WITH operator.',                         expr:"user.isMemberOf({'group.profile.name': 'IT', 'operator': 'STARTS_WITH'})" },
+    { ctx:'app_sign_on', tag:'Group',   name:'Group name exactly',          desc:"EXACT matches the whole name — 'West Coast' will not match 'West Coast Users'.", expr:"user.isMemberOf({'group.profile.name': 'Engineering', 'operator': 'EXACT'})" },
+    { ctx:'app_sign_on', tag:'Group',   name:'In any of several groups',     desc:'A list value ORs within one key — membership in any of the three passes.', expr:"user.isMemberOf({'group.profile.name': {'Engineering', 'US Employees', 'VPN Access'}})" },
+    { ctx:'app_sign_on', tag:'Group',   name:'Okta-native group only',      desc:'Two criteria objects AND together: an Okta-mastered group whose name starts with the prefix, ignoring AD-synced ones.', expr:"user.isMemberOf({'group.type': 'OKTA_GROUP'}, {'group.profile.name': 'Eng'})" },
     { ctx:'app_sign_on', tag:'Device',  name:'Managed device check',        desc:'True when request comes from a managed device.',                       expr:"device.profile.managed == true" },
     { ctx:'app_sign_on', tag:'Device',  name:'Registered device check',     desc:'True when device is registered with Okta.',                            expr:"device.profile.registered == true" },
     { ctx:'app_sign_on', tag:'Session', name:'MFA completed',               desc:'True when MFA was performed in this session.',                         expr:"Arrays.contains(session.amr, 'mfa')" },
@@ -1847,17 +1864,29 @@ ${attrLines}
   function toGroupObject(g) {
     const href = g._links && g._links.source && g._links.source.href;
     const srcId = href ? String(href).split('/').filter(Boolean).pop() : null;
+    // Pass the record through rather than picking fields. Okta documents the
+    // projection expression as "any group attribute", pointing at the List all
+    // groups schema, so narrowing here made `.![objectClass]` — or any custom
+    // group profile attribute — resolve to null against a real tenant while it
+    // resolves in Okta. `_links` / `_embedded` are dropped: they're transport
+    // metadata, `_links` is bulky, and `source.id` below is the only part of it
+    // that's addressable.
+    const { _links, _embedded, ...rest } = g;
     return {
-      id:                     g.id,
-      type:                   g.type,
-      created:                g.created ?? null,
-      lastUpdated:            g.lastUpdated ?? null,
-      lastMembershipUpdated:  g.lastMembershipUpdated ?? null,
+      ...rest,
+      // Keep these two guaranteed-present regardless of what the record carries,
+      // since criteria matching and the documented projections both read them.
       profile: {
+        ...(g.profile || {}),
         name:        g.profile ? g.profile.name : null,
         description: g.profile ? (g.profile.description ?? null) : null,
       },
-      ...(srcId ? { source: { id: srcId } } : {}),
+      created:                g.created ?? null,
+      lastUpdated:            g.lastUpdated ?? null,
+      lastMembershipUpdated:  g.lastMembershipUpdated ?? null,
+      // Okta reports the source app as a link, not a field; criteria read
+      // `group.source.id`, so lift it. An explicit `source` on the record wins.
+      ...(g.source ? { source: g.source } : (srcId ? { source: { id: srcId } } : {})),
     };
   }
 
@@ -2468,12 +2497,29 @@ ${attrLines}
   // Resolve a dotted path like "app.profile" against state.profile. Returns
   // the value at that path (may be an object, array, string, etc.), or null
   // if the path can't be resolved.
+  // The `user.profile.*` view. Identity Engine namespaces profile attributes
+  // separately from the record-level internals read as `user.$property`, but
+  // state.profile.user is flat (that's what `user.department` reads). Derive the
+  // profile half by subtracting the record keys — the same way the evaluator
+  // does, off the same exported set, so the two can't disagree.
+  function userProfileView(rawUser) {
+    if (rawUser.profile && typeof rawUser.profile === 'object') return rawUser.profile;
+    const recKeys = (typeof OELEvaluator !== 'undefined' && OELEvaluator.USER_RECORD_KEYS) || new Set();
+    const out = {};
+    for (const k of Object.keys(rawUser)) {
+      if (!recKeys.has(k) && typeof rawUser[k] !== 'function') out[k] = rawUser[k];
+    }
+    return out;
+  }
+
   function resolveValuePath(path) {
     const parts = path.split('.');
     if (!AC_ROOTS.has(parts[0])) return null;
     let cur = state.profile[parts[0]];
     if (cur == null) return null;
-    for (let i = 1; i < parts.length; i++) {
+    let start = 1;
+    if (parts[0] === 'user' && parts[1] === 'profile') { cur = userProfileView(cur); start = 2; }
+    for (let i = start; i < parts.length; i++) {
       cur = cur?.[parts[i]];
       if (cur == null) return null;
     }
@@ -2488,88 +2534,343 @@ ${attrLines}
     return v;
   }
 
-  // Identity Engine method-style completions available on string values.
-  // Only Okta-documented OEL / IE methods — no invented aliases.
-  // Keep in sync with STRING_METHOD_ALIASES in evaluator.js — a name here that
-  // isn't in that table autocompletes into an expression that won't evaluate.
-  const STRING_METHOD_COMPLETIONS = [
-    'substringBefore', 'substringAfter', 'substring',
-    'toUpperCase', 'toLowerCase', 'removeSpaces',
-    'replace', 'replaceFirst', 'contains', 'length',
-    'toInteger', 'toNumber',
-    'parseStringTime', 'parseUnixTime', 'parseWindowsTime',
-    'parseCountryCode', 'versionGreaterThan', 'versionLessThan',
-  ];
+  // Identity Engine method-style completions, read straight off the evaluator's
+  // alias tables. These used to be two hand-copied lists carrying a "keep in sync"
+  // comment — the kind that rots silently in both directions: a name listed here
+  // but missing from the table completes into an expression that won't evaluate,
+  // and a method added to the table but not here stays undiscoverable. Reading the
+  // real tables deletes the failure mode instead of documenting it.
+  const MN = (typeof OELEvaluator !== 'undefined' && OELEvaluator.METHOD_NAMES)
+    || { string: [], array: [], number: [], datetime: [], country: [] };
 
-  // Method completions on ZonedDateTime-like values (results of parseStringTime,
-  // DateTime.now(), etc.). We can't detect these values from the profile without
-  // executing, but users chain them after other calls — signature help will
-  // still work in that case.
-  const DATETIME_METHOD_COMPLETIONS = [
-    'withinDays', 'withinHours', 'withinMinutes', 'withinSeconds',
-    'plusDays', 'plusHours', 'plusMinutes', 'plusSeconds',
-    'minusDays', 'minusHours', 'minusMinutes', 'minusSeconds',
-    'toZone', 'toString', 'toUnix', 'toWindows',
-  ];
+  // Group criteria vocabulary, likewise from the evaluator so there's one source.
+  const GROUP_CRITERIA_KEYS = (typeof OELEvaluator !== 'undefined' && OELEvaluator.GROUP_CRITERIA_KEYS) || [];
+  const GROUP_OPERATORS     = (typeof OELEvaluator !== 'undefined' && OELEvaluator.GROUP_OPERATORS) || [];
+  const GROUP_TYPES         = (typeof OELEvaluator !== 'undefined' && OELEvaluator.GROUP_TYPES) || [];
+  const GROUP_FIELDS        = (typeof OELEvaluator !== 'undefined' && OELEvaluator.GROUP_FIELDS) || [];
 
-  // Return {items, replaceStart} or null if no autocomplete should show.
+  // Methods the OEL user object carries, pulled from FUNCTION_REFERENCE so the
+  // Reference tab stays the single place they're declared. Without these, `user.`
+  // offered profile attributes only and `user.getG` completed to nothing — the
+  // methods live in the evaluator's buildContext, never on state.profile.user.
+  function acUserMethodNames() {
+    const out = [];
+    for (const ns of FUNCTION_REFERENCE) {
+      for (const fn of ns.fns) {
+        const name = fn.sig.split('(')[0];
+        if (name.startsWith('user.')) out.push(name.substring('user.'.length));
+      }
+    }
+    return [...new Set(out)];
+  }
+
+  // Walk back from the index of a trailing '.' over one chain of segments,
+  // stepping over balanced call parens (and string literals inside them) so
+  // `user.created.parseStringTime().` reads as a chain rather than stopping at
+  // the ')'. Returns null when the parens don't balance.
+  function scanChainBefore(text, dotPos) {
+    let i = dotPos - 1;
+    while (i >= 0) {
+      const ch = text[i];
+      if (ch === ')') {
+        let depth = 1;
+        i--;
+        while (i >= 0 && depth > 0) {
+          const c = text[i];
+          if (c === ')') depth++;
+          else if (c === '(') depth--;
+          else if (c === '"' || c === "'") { const q = c; i--; while (i >= 0 && text[i] !== q) i--; }
+          i--;
+        }
+        if (depth > 0) return null;
+        continue;
+      }
+      if (/[A-Za-z0-9_.]/.test(ch)) { i--; continue; }
+      break;
+    }
+    const chain = text.substring(i + 1, dotPos);
+    return /^[A-Za-z_]/.test(chain) ? { chain, start: i + 1 } : null;
+  }
+
+  // What kind of value does `chain` hold? The profile lookup answers most chains
+  // without running anything; a chain containing a call has to be evaluated, which
+  // is cheap here because these expressions are a few tokens long. Used to pick the
+  // method-completion table, so a wrong answer just means no suggestions.
+  function chainValueType(chain) {
+    let val;
+    if (!chain.includes('(')) {
+      val = resolveValuePath(chain);
+    } else {
+      try {
+        const r = state.evaluator.evaluate(chain, state.profile);
+        if (!r.success) return null;
+        val = r.result;
+      } catch { return null; }
+    }
+    if (val == null) return null;
+    if (typeof val === 'string')  return 'string';
+    if (Array.isArray(val))       return 'array';
+    if (typeof val === 'number')  return 'number';
+    if (val._isOELDateTime)       return 'datetime';
+    if (val._isOELCountryCode)    return 'country';
+    return null;
+  }
+
+  // ── getGroups / isMemberOf criteria context ───────────────────
+  // Where the caret sits inside `user.getGroups({'group.type': {'OKTA…`. Only
+  // fires inside an open quote: criteria keys contain dots, so a bare identifier
+  // wouldn't lex as one key — they have to be quoted, and completing outside the
+  // quotes would insert something that can't parse.
+  //
+  // Returns { pos: 'key' | 'value', key, partial, replaceStart } or null.
+  function parseCriteriaContext(text, caret) {
+    const stack  = [];     // { t:'(' , name } | { t:'{' }
+    const braces = [];     // parallel to the '{' frames: { sawColon, lastString }
+    let q = null, qStart = -1;
+    let i = 0;
+    while (i < caret) {
+      const ch = text[i];
+      if (q) {
+        if (ch === '\\') { i += 2; continue; }
+        if (ch === q) {
+          if (braces.length) braces[braces.length - 1].lastString = text.substring(qStart + 1, i);
+          q = null; qStart = -1;
+        }
+        i++; continue;
+      }
+      if (ch === '"' || ch === "'") { q = ch; qStart = i; i++; continue; }
+      if (ch === '(') {
+        let j = i - 1;
+        while (j >= 0 && /\s/.test(text[j])) j--;
+        const nameEnd = j + 1;
+        while (j >= 0 && /[\w.]/.test(text[j])) j--;
+        stack.push({ t: '(', name: text.substring(j + 1, nameEnd) });
+        i++; continue;
+      }
+      if (ch === ')') { if (stack.length && stack[stack.length-1].t === '(') stack.pop(); i++; continue; }
+      if (ch === '{') { stack.push({ t: '{' }); braces.push({ sawColon: false, lastString: null }); i++; continue; }
+      if (ch === '}') {
+        if (stack.length && stack[stack.length-1].t === '{') stack.pop();
+        braces.pop();
+        i++; continue;
+      }
+      if (braces.length) {
+        const b = braces[braces.length - 1];
+        if (ch === ':') { b.sawColon = true; i++; continue; }
+        if (ch === ',') { b.sawColon = false; b.lastString = null; i++; continue; }
+      }
+      i++;
+    }
+
+    if (q === null || !braces.length) return null;
+    // The enclosing call has to be one of the two criteria-taking functions.
+    let call = null;
+    for (let k = stack.length - 1; k >= 0; k--) { if (stack[k].t === '(') { call = stack[k]; break; } }
+    if (!call || !/(^|\.)(getGroups|isMemberOf)$/.test(call.name)) return null;
+
+    const inner  = braces[braces.length - 1];
+    const parent = braces.length >= 2 ? braces[braces.length - 2] : null;
+    // A value written as a set — `{'group.type': {'OKTA_GROUP'}}` — puts the caret
+    // one brace deeper than the criteria map, so the key is the parent's.
+    const pos = inner.sawColon ? 'value'
+              : (parent && parent.sawColon ? 'value' : 'key');
+    const key = inner.sawColon ? inner.lastString : (parent ? parent.lastString : null);
+
+    return { pos, key, quote: q,
+             partial: text.substring(qStart + 1, caret), replaceStart: qStart + 1 };
+  }
+
+  // Completions for a criteria position. Values for the three id/name/type keys come
+  // from the *live* group records, so picking a group name means picking one that
+  // actually exists on the selected user rather than typing it from memory.
+  function criteriaCompletions(ctx) {
+    const objs = (state.profile && state.profile.groupObjects) || [];
+    if (ctx.pos === 'key') {
+      return [...GROUP_CRITERIA_KEYS.map(k => ({ name: k, kind: 'criteria' })),
+              { name: 'operator', kind: 'criteria', hint: metaHint(GROUP_OPERATORS.join(' | ')) }];
+    }
+    if (ctx.key === 'operator')   return GROUP_OPERATORS.map(v => ({ name: v, kind: 'criteria',
+                                    hint: metaHint(v === 'STARTS_WITH' ? 'default' : 'whole name') }));
+    if (ctx.key === 'group.type') return GROUP_TYPES.map(v => ({ name: v, kind: 'criteria',
+                                    hint: metaHint(countGroups(objs, g => g.type === v)) }));
+    if (ctx.key === 'group.profile.name') {
+      const names = objs.map(g => g.profile && g.profile.name).filter(Boolean);
+      const list  = names.length ? names : ((state.profile && state.profile.groups) || []);
+      return [...new Set(list)].map(n => ({ name: n, kind: 'criteria', hint: metaHint('group') }));
+    }
+    if (ctx.key === 'group.id') {
+      return objs.filter(g => g.id).map(g => ({ name: String(g.id), kind: 'criteria',
+        hint: metaHint((g.profile && g.profile.name) || 'group') }));
+    }
+    if (ctx.key === 'group.source.id') {
+      const seen = new Map();
+      for (const g of objs) {
+        const sid = g.source && g.source.id;
+        if (sid && !seen.has(sid)) seen.set(sid, (g.profile && g.profile.name) || 'source');
+      }
+      return [...seen].map(([sid, label]) => ({ name: sid, kind: 'criteria', hint: metaHint(label) }));
+    }
+    return [];
+  }
+
+  const metaHint    = (s) => `<span class="ac-hint-meta">${esc(String(s))}</span>`;
+  const countGroups = (objs, pred) => {
+    const n = objs.filter(pred).length;
+    return n ? `${n} group${n === 1 ? '' : 's'}` : 'none here';
+  };
+
+  // Does `text` end in a call to `fnName`? Walks the trailing `)` back to its
+  // matching `(` (skipping string literals) and checks the name in front of it,
+  // so criteria containing their own parens or braces don't fool it.
+  function endsWithCallTo(text, fnName) {
+    let i = text.length - 1;
+    while (i >= 0 && /\s/.test(text[i])) i--;
+    if (i < 0 || text[i] !== ')') return false;
+    let depth = 1;
+    i--;
+    while (i >= 0 && depth > 0) {
+      const c = text[i];
+      if (c === ')') depth++;
+      else if (c === '(') depth--;
+      else if (c === '"' || c === "'") { const q = c; i--; while (i >= 0 && text[i] !== q) i--; }
+      i--;
+    }
+    if (depth > 0) return false;
+    let end = i + 1;
+    while (end > 0 && /\s/.test(text[end - 1])) end--;
+    let s = end;
+    while (s > 0 && /[A-Za-z0-9_]/.test(text[s - 1])) s--;
+    return text.substring(s, end) === fnName;
+  }
+
+  // ── Collection projection context ─────────────────────────────
+  // Where the caret sits inside `user.getGroups(…).![` — scan back for an
+  // unclosed '[' and check it's the projection form. Returns null for a plain
+  // index bracket like `appuser.memberOf[0`.
+  function parseProjectionContext(text, caret) {
+    let depth = 0;
+    for (let i = caret - 1; i >= 0; i--) {
+      const ch = text[i];
+      if (ch === ']') { depth++; continue; }
+      if (ch !== '[') continue;
+      if (depth > 0) { depth--; continue; }
+      if (!(i >= 2 && text[i-1] === '!' && text[i-2] === '.')) return null;
+      // Only offer group fields when the thing being projected is a group
+      // collection, which in OEL means a getGroups() call — `groups` is the flat
+      // array of name strings, and projecting `profile.name` over those yields
+      // nulls. Checked by walking the receiver's trailing call back to its own
+      // open paren rather than by regex, so nested parens in the criteria don't
+      // break it and an unrelated array can't pick up group fields.
+      if (!endsWithCallTo(text.substring(0, i - 2), 'getGroups')) return null;
+      const body = text.substring(i + 1, caret);
+      const m = body.match(/([A-Za-z_][A-Za-z0-9_.]*)?$/);
+      const partial = (m && m[1]) || '';
+      return { partial, replaceStart: caret - partial.length };
+    }
+    return null;
+  }
+
+  // Documented projection fields first, then anything else the live records carry.
+  // Okta documents the projection as "any group attribute" and points at the List
+  // all groups schema, so the seven are the discoverable set, not the allowed one.
+  function projectionCompletions() {
+    const objs  = (state.profile && state.profile.groupObjects) || [];
+    const extra = new Set();
+    for (const g of objs) {
+      for (const path of Object.keys(flattenAttrs(g))) {
+        if (!path.startsWith('_') && !GROUP_FIELDS.includes(path)) extra.add(path);
+      }
+    }
+    return [
+      ...GROUP_FIELDS.map(f => ({ name: f, kind: 'groupfield', hint: metaHint('documented') })),
+      ...[...extra].sort().map(f => ({ name: f, kind: 'groupfield', hint: metaHint('on this tenant') })),
+    ];
+  }
+
+  // Rank + trim a candidate list against what's been typed. Preserves the order
+  // the caller supplied for equal ranks, so a curated list (documented projection
+  // fields ahead of tenant-specific ones) keeps its shape.
+  function acRank(items, partial) {
+    const p = partial.toLowerCase();
+    return items
+      .filter(it => !p || it.name.toLowerCase().includes(p))
+      .map((it, i) => ({ it, rank: p && it.name.toLowerCase().startsWith(p) ? 0 : (p ? 1 : 0), i }))
+      .sort((a, b) => a.rank - b.rank || a.i - b.i)
+      .slice(0, 40)
+      .map(x => x.it);
+  }
+
+  // Return { items, replaceStart, chain } or null if no autocomplete should show.
+  // `items` are { name, kind, hint? } — a single list can mix kinds, which is the
+  // point: `user.` offers its attributes and its methods together.
   function computeAutocomplete(text, caret) {
-    // Grab everything up to caret; scan back to a `.` preceded by an identifier.
-    // Match `<identifier(.identifier)*>.<optional partial>` immediately before caret.
-    const upto = text.substring(0, caret);
-    const m = upto.match(/([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\.([A-Za-z_][A-Za-z0-9_]*)?$/);
-    if (!m) return null;
-    const chain   = m[1];      // e.g. "user" or "app.profile"
-    const partial = m[2] || '';
-    const rootIdent = chain.split('.')[0];
+    // The two bracket/brace contexts come first. Neither is reachable by the
+    // dot-chain rule below, and both are where the group syntax is hardest to
+    // recall, so they get first refusal.
+    const proj = parseProjectionContext(text, caret);
+    if (proj) {
+      const items = acRank(projectionCompletions(), proj.partial);
+      return items.length ? { items, replaceStart: proj.replaceStart, chain: '' } : null;
+    }
+    const crit = parseCriteriaContext(text, caret);
+    if (crit) {
+      const items = acRank(criteriaCompletions(crit), crit.partial);
+      return items.length
+        ? { items, replaceStart: crit.replaceStart, chain: '', quote: crit.quote }
+        : null;
+    }
+
+    // Dot-chain: `<chain>.<partial>` immediately before the caret.
+    const pm      = text.substring(0, caret).match(/([A-Za-z_][A-Za-z0-9_]*)?$/);
+    const partial = (pm && pm[1]) || '';
+    const dotPos  = caret - partial.length - 1;
+    if (dotPos < 0 || text[dotPos] !== '.') return null;
+    const scanned = scanChainBefore(text, dotPos);
+    if (!scanned) return null;
+    const chain     = scanned.chain;
+    const rootIdent = chain.split(/[.(]/)[0];
     if (!AC_ROOTS.has(rootIdent)) return null;
 
-    let candidates = [];
-    let completionKind = 'attribute';   // 'attribute' | 'function' | 'method'
+    let items = [];
     // Function namespaces short-circuit — only their functions apply, and
     // only at the first level (String.foo, not String.foo.bar).
     if (['String','Arrays','Time','Convert','Iso3166Convert','DateTime','Groups'].includes(rootIdent) && chain === rootIdent) {
-      candidates = acFunctionNames(rootIdent);
-      completionKind = 'function';
+      items = acFunctionNames(rootIdent).map(name => ({ name, kind: 'function' }));
     } else {
       const obj = resolveObjectPath(chain);
-      if (obj) candidates = Object.keys(obj);
+      const attrs = new Set(obj ? Object.keys(obj) : []);
       // For `user.` and `appuser.` also merge in schema keys (declared attrs
       // even if not currently populated).
-      if (chain === 'user'    && state.userSchema) candidates = [...new Set([...candidates, ...Object.keys(state.userSchema)])];
-      if (chain === 'appuser' && state.appSchema)  candidates = [...new Set([...candidates, ...Object.keys(state.appSchema)])];
-      // Method chaining: if the chain resolves to a STRING, offer Identity
-      // Engine method-style completions like `.substringBefore(...)`.
-      if (!candidates.length) {
-        const val = resolveValuePath(chain);
-        if (typeof val === 'string') {
-          candidates = STRING_METHOD_COMPLETIONS.slice();
-          completionKind = 'method';
-        }
+      if (chain === 'user'    && state.userSchema) Object.keys(state.userSchema).forEach(k => attrs.add(k));
+      if (chain === 'appuser' && state.appSchema)  Object.keys(state.appSchema).forEach(k => attrs.add(k));
+      // `user.profile` is a real path even though state.profile.user is flat —
+      // the evaluator synthesizes it, so it belongs in the list.
+      if (chain === 'user') attrs.add('profile');
+      const attrItems = [...attrs].sort().map(name => ({ name, kind: 'attribute' }));
+
+      // The OEL methods on the user object, offered alongside its attributes —
+      // and ahead of them. There are only four, and unlike attributes they have
+      // no Quick Insert equivalent, so they're the ones that need the visibility.
+      // Behind ~40 profile keys they'd fall past the list cap and stay invisible,
+      // which is the bug this whole change exists to fix.
+      items = chain === 'user'
+        ? [...acUserMethodNames().map(name => ({ name, kind: 'function' })), ...attrItems]
+        : attrItems;
+
+      // Method chaining on a leaf value. Only when there are no attributes to
+      // show — an object has keys, a string/array/number/DateTime has methods.
+      if (!items.length) {
+        const t = chainValueType(chain);
+        if (t && MN[t]) items = MN[t].map(name => ({ name, kind: 'method' }));
       }
     }
 
-    // Filter by partial (case-insensitive) and rank prefix-match above contains.
-    const p = partial.toLowerCase();
-    const scored = candidates
-      .filter(c => !p || c.toLowerCase().includes(p))
-      .map(c => ({
-        name: c,
-        rank: p && c.toLowerCase().startsWith(p) ? 0 : (p ? 1 : 0),
-      }))
-      .sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name))
-      .slice(0, 40);
-
-    if (!scored.length) return null;
-    return {
-      items: scored.map(s => s.name),
-      replaceStart: caret - partial.length,
-      chain,
-      kind: completionKind,
-    };
+    const ranked = acRank(items, partial);
+    if (!ranked.length) return null;
+    return { items: ranked, replaceStart: caret - partial.length, chain };
   }
 
-  const acState = { items: [], index: 0, replaceStart: 0, open: false, chain: '', kind: 'attribute' };
+  const acState = { items: [], index: 0, replaceStart: 0, open: false, chain: '', quote: "'" };
 
   // Format a value for the right-side hint column in the completion list.
   // Kept short — this is a peek, not a full read. Full-width truncation at 32.
@@ -2579,8 +2880,12 @@ ${attrLines}
       const fqName = chain + '.' + name;
       let sig = SIG_INDEX.get(fqName);
       if (!sig && kind === 'method') {
-        // Method chaining: look up the plain method name (matches String.<method>).
-        sig = SIG_INDEX.get('String.' + name) || SIG_INDEX.get('Time.' + name);
+        // Method chaining: the reference declares these under whichever namespace
+        // owns the equivalent function, so try each rather than just String.
+        for (const ns of ['String', 'Arrays', 'Time', 'Convert', 'Iso3166Convert', 'DateTime']) {
+          sig = SIG_INDEX.get(ns + '.' + name);
+          if (sig) break;
+        }
       }
       if (sig) {
         const p = sig.params.map(x => x.label).join(', ');
@@ -2642,10 +2947,12 @@ ${attrLines}
       popup.innerHTML = '';
       return;
     }
-    popup.innerHTML = acState.items.map((name, i) => {
-      const hint = acFormatHint(acState.chain, name, acState.kind);
+    popup.innerHTML = acState.items.map((it, i) => {
+      // A precomputed hint wins — criteria values carry their own (the group name
+      // behind an id), which no generic profile lookup could produce.
+      const hint = it.hint || acFormatHint(acState.chain, it.name, it.kind);
       return `<button class="ac-item${i===acState.index?' ac-item-sel':''}" data-i="${i}">
-        <span class="ac-name">${esc(name)}</span><span class="ac-hint">${hint}</span>
+        <span class="ac-name">${esc(it.name)}</span><span class="ac-hint">${hint}</span>
       </button>`;
     }).join('');
     popup.classList.remove('hidden');
@@ -2671,7 +2978,7 @@ ${attrLines}
     acState.replaceStart = res.replaceStart;
     acState.open         = true;
     acState.chain        = res.chain;
-    acState.kind         = res.kind;
+    acState.quote        = res.quote || "'";
     renderAutocomplete();
   }
 
@@ -2679,28 +2986,49 @@ ${attrLines}
     if (!acState.open || !acState.items.length) return false;
     const ta = document.getElementById('expr-input');
     if (!ta) return false;
-    const pick = acState.items[acState.index];
+    const item = acState.items[acState.index];
+    const pick = item.name;
     const before = ta.value.substring(0, acState.replaceStart);
     const after  = ta.value.substring(ta.selectionEnd);
 
     // Functions and methods get inserted with parens, cursor between them,
-    // and signature help fired immediately. Attributes insert plain.
+    // and signature help fired immediately. Everything else inserts plain.
     // Skip appending parens if the user's text already has an open paren
     // right after (e.g., they typed the `(` themselves).
-    const isFn = acState.kind === 'function' || acState.kind === 'method';
+    const isFn = item.kind === 'function' || item.kind === 'method';
     const nextChar = after[0] || '';
     const appendParens = isFn && nextChar !== '(';
 
-    const insertion = appendParens ? pick + '()' : pick;
-    ta.value = before + insertion + after;
-    // Caret goes between the parens for functions, or at end of the pick for attrs.
-    const caretPos = appendParens ? before.length + pick.length + 1 : before.length + pick.length;
+    // A criteria key is only useful followed by its value, and the caret is
+    // sitting inside the key's quotes. Close the key, write `: `, and open a
+    // fresh quoted value with the caret inside it — which re-triggers completion
+    // at the value position, where the live group names are.
+    const q = acState.quote || "'";
+    const isCriteriaKey = item.kind === 'criteria'
+      && GROUP_CRITERIA_KEYS.concat('operator').includes(pick);
+    // The user may or may not have typed the key's closing quote already.
+    const hadClosingQuote = isCriteriaKey && nextChar === q;
+
+    let insertion = pick, caretOffset = pick.length;
+    if (appendParens) {
+      insertion = pick + '()';
+      caretOffset = pick.length + 1;
+    } else if (isCriteriaKey) {
+      insertion   = pick + q + ': ' + q + (hadClosingQuote ? q : '');
+      caretOffset = pick.length + 1 + 2 + 1;   // just inside the opened value quote
+    }
+
+    const tail = hadClosingQuote ? after.substring(1) : after;
+    ta.value = before + insertion + tail;
+    const caretPos = before.length + caretOffset;
     ta.setSelectionRange(caretPos, caretPos);
     closeAutocomplete();
     renderHighlight();
     scheduleEval();
     // Trigger signature help so the user sees the params immediately.
     if (appendParens) setTimeout(renderSignatureHelp, 0);
+    // Re-run completion so the value list opens without another keystroke.
+    if (isCriteriaKey) setTimeout(updateAutocomplete, 0);
     return true;
   }
 
@@ -2760,6 +3088,15 @@ ${attrLines}
     };
   }
 
+  // Receivers the reference uses as stand-ins when documenting a chain method —
+  // `value.toUpperCase()`, `dateValue.withinDays(n)`. These aren't callable names,
+  // so they must not enter the index. Everything else must: the previous rule here
+  // was "skip anything not starting with a capital", which also threw out all four
+  // user.* methods, every isMemberOf*/getFilteredGroups group function, the whole
+  // manager/directory family and the five deprecated forms — 23 real functions with
+  // no signature help.
+  const SIG_PLACEHOLDER_RECEIVERS = new Set(['value', 'dateValue']);
+
   // Build a name → signature entry index once so lookups are cheap.
   const SIG_INDEX = (() => {
     const idx = new Map();
@@ -2767,9 +3104,7 @@ ${attrLines}
       for (const fn of ns.fns) {
         const parsed = parseSignature(fn.sig);
         if (!parsed) continue;
-        // Ignore method-style signatures like `value.toUpperCase()` — those
-        // start with a lowercase pseudo-identifier, not a real function name.
-        if (!/^[A-Z]/.test(parsed.funcName)) continue;
+        if (SIG_PLACEHOLDER_RECEIVERS.has(parsed.funcName.split('.')[0])) continue;
         idx.set(parsed.funcName, { ...parsed, desc: fn.desc, ex: fn.ex });
       }
     }
@@ -2854,6 +3189,21 @@ ${attrLines}
   }
 
   // ── Insert helpers ────────────────────────────────────────────
+
+  // Replace the whole expression. Every programmatic write to the textarea has to
+  // re-render the highlight layer: the `<pre>` behind the textarea is the visible
+  // text and the textarea's own glyphs are transparent, so setting `.value`
+  // without re-rendering leaves the new expression invisible — it evaluates
+  // correctly and shows nothing, or shows whatever was there before. That's not a
+  // hypothetical; the Reference tab shipped with exactly this bug because it set
+  // `.value` directly. Route new whole-value writes through here instead.
+  function setExpression(text) {
+    const ta = document.getElementById('expr-input'); if (!ta) return;
+    ta.value = text;
+    renderHighlight();
+    scheduleEval();
+  }
+
   function insertAt(text) {
     const ta = document.getElementById('expr-input'); if (!ta) return;
     ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end');
@@ -3014,13 +3364,13 @@ ${attrLines}
       });
     });
     document.getElementById('btn-clear')?.addEventListener('click', () => {
-      const ta = document.getElementById('expr-input'); if(ta){ta.value=''; renderHighlight(); scheduleEval();}
+      setExpression('');
     });
 
     // Reference: click to use in builder
     document.getElementById('ref-list')?.addEventListener('click', e => {
       const fn = e.target.closest('.ref-fn');
-      if (fn?.dataset.insert) { const ta=document.getElementById('expr-input'); if(ta){ta.value=fn.dataset.insert;scheduleEval();} switchTab('builder'); }
+      if (fn?.dataset.insert) { setExpression(fn.dataset.insert); switchTab('builder'); }
     });
 
     // Reference: filter
@@ -3060,8 +3410,7 @@ ${attrLines}
     document.getElementById('tpl-list')?.addEventListener('click', e => {
       const item = e.target.closest('.tpl-item');
       if (item?.dataset.expr) {
-        const ta = document.getElementById('expr-input');
-        if (ta) { ta.value = item.dataset.expr; renderHighlight(); scheduleEval(); }
+        setExpression(item.dataset.expr);
         switchTab('builder');
       }
     });

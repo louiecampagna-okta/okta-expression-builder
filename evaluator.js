@@ -900,13 +900,47 @@
           const collection = this.eval(node.collection);
           if (collection == null) return null;
           const arr = Array.isArray(collection) ? collection : [collection];
-          return arr.map(item => {
+          let firstError = null, threw = 0;
+          const out = arr.map(item => {
             const projCtx = (item && typeof item === 'object')
-              ? { ...this.ctx, ...item }
+              ? { ...this.ctx, ...projectionAliases(item), ...item }
               : { ...this.ctx, it: item };
             try { return new Interpreter(projCtx).eval(node.expr); }
-            catch { return null; }
+            catch (e) { threw++; if (!firstError) firstError = e; return null; }
           });
+          // Per-element tolerance is for heterogeneous collections, where one
+          // element legitimately lacks what another has. But a projection that
+          // addresses nothing on ANY element isn't missing data — it's a broken
+          // expression, and swallowing it returns a wall of nulls that reads
+          // exactly like a working one. That's two cases:
+          //   · an unbound identifier (`.![nmae]`), which throws per element
+          //   · a sub-field absent everywhere (`.![profile.bogus]`), which reads
+          //     as null because OEL property reads are null-tolerant
+          // Both get surfaced. Present-but-null is left alone: a group with no
+          // description really does project null, and warning on that would cry
+          // wolf on correct expressions.
+          if (arr.length && out.every(v => v === null)) {
+            const segs   = simplePathSegments(node.expr);
+            const objs   = arr.filter(x => x && typeof x === 'object');
+            const absent = segs && objs.length === arr.length
+              && arr.every(x => pathAbsentOn({ ...projectionAliases(x), ...x }, segs));
+            if (threw === arr.length || absent) {
+              const sample = objs[0];
+              // Include the aliases, or the hint omits `name` on a group — the
+              // very field the reader most likely meant.
+              const avail = sample
+                ? Object.keys({ ...projectionAliases(sample), ...sample })
+                    .filter(k => !k.startsWith('_')).sort().join(', ')
+                : '';
+              const why = threw === arr.length
+                ? firstError.message
+                : `'${segs.join('.')}' is not an attribute of any of them`;
+              throw new Error(`collection projection returned nothing for any of the ${arr.length} `
+                + `element${arr.length === 1 ? '' : 's'} — ${why}`
+                + (avail ? `. Readable on each element: ${avail}` : ''));
+            }
+          }
+          return out;
         }
 
         case 'Unary': {
@@ -956,6 +990,80 @@
   // ═══════════════════════════════════════════════════════════════
   //  CONTEXT FACTORY
   // ═══════════════════════════════════════════════════════════════
+
+  // ── Group criteria vocabulary ────────────────────────────────────
+  // Documented sets, exported on the public class so content.js can drive
+  // autocomplete off them instead of keeping a second hand-copied list. The
+  // operators and the three group types all appear verbatim in the reference's
+  // own getGroups / isMemberOf examples.
+  const GROUP_CRITERIA_KEY_NAMES = ['group.id', 'group.type', 'group.source.id', 'group.profile.name'];
+  const GROUP_OPERATORS = ['STARTS_WITH', 'EXACT'];   // STARTS_WITH is the default
+  const GROUP_TYPES     = ['OKTA_GROUP', 'APP_GROUP', 'BUILT_IN'];
+  // The projection fields Okta illustrates. Not a limit — the docs say the
+  // projection "can be any group attribute" and point at the List all groups
+  // API schema, so a field outside this list still resolves if the record
+  // carries it. This is the discoverable set, not the permitted one.
+  //
+  // `name` leads because it's the form the classic reference documents and
+  // shows: "The user.getGroups function supports the .![name] collection
+  // projection", worked as
+  //   user.getGroups({"group.profile.name": "Everyone", "operator": "STARTS_WITH"}).![name]
+  // The Identity Engine reference documents `profile.name` for the same read.
+  // Both are published, so both resolve — see projectionAliases below.
+  const GROUP_FIELDS = ['name', 'id', 'type', 'created', 'lastUpdated',
+                        'lastMembershipUpdated', 'profile.name', 'profile.description'];
+
+  // Bare `name` on a group inside a collection projection. Classic OEL documents
+  // it; Identity Engine documents `profile.name`; a group record carries the
+  // latter, so the alias closes the gap. Scoped to the projection context because
+  // that is the scope the docs give it — "supports the .![name] collection
+  // projection" — rather than flattening the record everywhere.
+  //
+  // `description` is deliberately NOT aliased. Only `name` is documented bare;
+  // the classic page's phrasing reads as a specific legacy affordance for group
+  // claims, not as the whole profile being flattened. If Okta turns out to accept
+  // `.![description]` too, add it here with a doc citation — don't infer it from
+  // this one.
+  const projectionAliases = (item) => {
+    const p = item.profile;
+    return (p && typeof p === 'object' && own(p, 'name') !== undefined && own(item, 'name') === undefined)
+      ? { name: p.name }
+      : {};
+  };
+
+  // Is the projection body a plain attribute path — `name`, `profile.name` — as
+  // opposed to a compound expression? Returns the segments, or null. Only a plain
+  // path can be checked for existence; `profile.name + '/' + type` can legitimately
+  // evaluate to null on every element without anything being wrong.
+  function simplePathSegments(node) {
+    const segs = [];
+    let n = node;
+    while (n && n.type === 'Member') { segs.unshift(n.prop); n = n.object; }
+    if (!n || n.type !== 'Ident') return null;
+    segs.unshift(n.name);
+    return segs;
+  }
+
+  // Does `segs` address nothing on `obj`? Distinguishes absent from present-and-null,
+  // which is the whole point: a group with no description projects null legitimately,
+  // while `.![profile.bogus]` addresses nothing at all.
+  function pathAbsentOn(obj, segs) {
+    let cur = obj;
+    for (const s of segs) {
+      if (cur == null || typeof cur !== 'object' || own(cur, s) === undefined) return true;
+      cur = cur[s];
+    }
+    return false;
+  }
+
+  // Okta's docs write a `group.profile.name` criterion as `'Engineering.*'` and
+  // describe the result as groups whose name *starts with* `Engineering` — the
+  // trailing `.*` is decoration on an already-prefix match, not a pattern the
+  // page ever calls a regex. Dropping it is what makes the documented examples
+  // return what the documentation says they return. Deliberately only a trailing
+  // `.*`: treating the whole value as a regex would break a group legitimately
+  // named `C++ Devs` or `R&D (EU)`, and nothing in the docs asks for that.
+  const stripTrailingGlob = (v) => String(v).replace(/\.\*$/, '');
 
   // Okta user-record fields that are NOT profile attributes. Used to split
   // `user.profile.$prop` back out of the flattened user object. Wider than the
@@ -1013,7 +1121,7 @@
         if (actual == null) return false;
         const wanted = Array.isArray(criteria[key]) ? criteria[key] : [criteria[key]];
         const ok = wanted.some(w => (key === 'group.profile.name' && op === 'STARTS_WITH')
-          ? String(actual).startsWith(String(w))
+          ? String(actual).startsWith(stripTrailingGlob(w))
           : String(actual) === String(w));
         if (!ok) return false;
       }
@@ -1352,6 +1460,26 @@
       }
     }
   }
+
+  // ── Introspection for the UI ─────────────────────────────────────
+  // content.js drives autocomplete off these rather than keeping its own copies.
+  // The method-name lists in particular used to be hand-maintained mirrors of the
+  // alias tables with a "keep in sync" comment; reading the real tables means a
+  // method added below can't go missing from the completion list, and a completion
+  // can't be offered for a method that doesn't exist.
+  OELEvaluator.METHOD_NAMES = {
+    string:   Object.keys(STRING_METHOD_ALIASES),
+    array:    Object.keys(ARRAY_METHOD_ALIASES),
+    number:   Object.keys(NUMBER_METHOD_ALIASES),
+    datetime: Object.getOwnPropertyNames(OELDateTime.prototype).filter(n => n !== 'constructor'),
+    country:  Object.getOwnPropertyNames(OELCountryCode.prototype)
+                .filter(n => n !== 'constructor' && !n.startsWith('_is')),
+  };
+  OELEvaluator.GROUP_CRITERIA_KEYS = GROUP_CRITERIA_KEY_NAMES;
+  OELEvaluator.GROUP_OPERATORS     = GROUP_OPERATORS;
+  OELEvaluator.GROUP_TYPES         = GROUP_TYPES;
+  OELEvaluator.GROUP_FIELDS        = GROUP_FIELDS;
+  OELEvaluator.USER_RECORD_KEYS    = USER_RECORD_KEYS;
 
   global.OELEvaluator = OELEvaluator;
 

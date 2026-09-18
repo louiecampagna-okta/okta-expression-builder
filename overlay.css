@@ -525,6 +525,10 @@
 #oeb-root .ac-hint-obj  { color: var(--ody-n600); }
 #oeb-root .ac-hint-null { color: var(--ody-n400); font-style: italic; }
 #oeb-root .ac-hint-sig  { color: var(--ody-n600); font-style: italic; }
+/* Criteria keys/values and projection fields. These have no profile value to
+   peek at, so the hint carries provenance instead — the group name behind an id,
+   or whether a field is one Okta documents. */
+#oeb-root .ac-hint-meta { color: var(--ody-n500); }
 #oeb-root .ac-item-sel .ac-hint,
 #oeb-root .ac-item-sel .ac-hint > *  { color: inherit; }
 
